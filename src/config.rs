@@ -38,6 +38,47 @@ pub(crate) fn resolve_config_path(parent: &Path) -> PathBuf {
     current // best default for "doesn't exist anywhere yet" — vitalog wins
 }
 
+/// Env-aware variant of [`resolve_config_path`]. When `env_override` is
+/// `Some(non-empty)`, returns that path verbatim (tilde-expanded) without
+/// consulting `parent` — this is what enables a sandbox config via
+/// `$VITALOG_CONFIG`. Empty strings and `None` fall back to the
+/// parent-based resolver. Pure — no I/O side effects, no logging.
+pub(crate) fn resolve_config_path_with_env(env_override: Option<&str>, parent: &Path) -> PathBuf {
+    if let Some(p) = env_override {
+        if !p.is_empty() {
+            return expand_tilde(p);
+        }
+    }
+    resolve_config_path(parent)
+}
+
+/// Reads `$VITALOG_CONFIG`, treating an empty value as unset. Centralizes
+/// the policy so `config_path`, `config_dir`, and `load` agree on whether
+/// the user opted into a sandbox.
+fn vitalog_config_env() -> Option<String> {
+    std::env::var("VITALOG_CONFIG")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Formats the "config not found" error. When `from_env` is true the user
+/// set `$VITALOG_CONFIG` themselves, so `vitalog init` would land at the
+/// default path (not the override) — point at the env var instead.
+fn config_not_found_message(path: &Path, from_env: bool) -> String {
+    if from_env {
+        format!(
+            "Config not found at {} (set via $VITALOG_CONFIG). \
+             Create the file or unset the variable.",
+            path.display()
+        )
+    } else {
+        format!(
+            "Config not found at {}. Run `vitalog init` to create one.",
+            path.display()
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WeightUnit {
@@ -175,10 +216,8 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
         if !path.exists() {
-            color_eyre::eyre::bail!(
-                "Config not found at {}. Run `vitalog init` to create one.",
-                path.display()
-            );
+            let from_env = vitalog_config_env().is_some();
+            color_eyre::eyre::bail!("{}", config_not_found_message(&path, from_env));
         }
         let contents = std::fs::read_to_string(&path)
             .wrap_err_with(|| format!("Failed to read config at {}", path.display()))?;
@@ -250,20 +289,32 @@ impl Config {
         self.effective_today_date().format("%Y-%m-%d").to_string()
     }
 
+    /// Directory containing the config file. Used by `vitalog init` as the
+    /// `mkdir -p` target before writing `config_path()`. Derived from
+    /// `config_path()` so the env override is honored uniformly: if a user
+    /// sets `$VITALOG_CONFIG=/tmp/sandbox/config.toml`, init creates
+    /// `/tmp/sandbox/`, not `~/Library/Application Support/vitalog/`.
     pub fn config_dir() -> Result<PathBuf> {
-        let dir = dirs::config_dir()
-            .ok_or_else(|| color_eyre::eyre::eyre!("Could not determine config directory"))?
-            .join("vitalog");
-        Ok(dir)
+        let path = Self::config_path()?;
+        path.parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| color_eyre::eyre::eyre!("Could not determine config directory"))
     }
 
     pub fn config_path() -> Result<PathBuf> {
         let parent = dirs::config_dir()
             .ok_or_else(|| color_eyre::eyre::eyre!("Could not determine config directory"))?;
-        let resolved = resolve_config_path(&parent);
-        let legacy_dir = parent.join("daylog");
-        if resolved.starts_with(&legacy_dir) {
-            print_legacy_hint_once(&legacy_dir, &parent.join("vitalog"));
+        let env = vitalog_config_env();
+        let resolved = resolve_config_path_with_env(env.as_deref(), &parent);
+        // Legacy daylog fallback only matters when we're using the
+        // default parent-based resolution. With an env override the user
+        // has explicitly opted into a sandbox path; there's no legacy to
+        // migrate from.
+        if env.is_none() {
+            let legacy_dir = parent.join("daylog");
+            if resolved.starts_with(&legacy_dir) {
+                print_legacy_hint_once(&legacy_dir, &parent.join("vitalog"));
+            }
         }
         Ok(resolved)
     }
@@ -613,5 +664,105 @@ mod legacy_fallback_tests {
         let resolved = resolve_config_path(parent);
 
         assert_eq!(resolved, parent.join("vitalog/config.toml"));
+    }
+}
+
+#[cfg(test)]
+mod env_override_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn env_override_returns_env_path_verbatim_when_set() {
+        let tmp = TempDir::new().unwrap();
+        let env_path = tmp.path().join("sandbox/config.toml");
+        let parent = TempDir::new().unwrap();
+
+        let resolved =
+            resolve_config_path_with_env(Some(env_path.to_str().unwrap()), parent.path());
+
+        assert_eq!(resolved, env_path);
+    }
+
+    #[test]
+    fn env_override_expands_tilde() {
+        let parent = TempDir::new().unwrap();
+
+        let resolved = resolve_config_path_with_env(Some("~/sandbox/config.toml"), parent.path());
+
+        let home = dirs::home_dir().expect("home dir");
+        assert_eq!(resolved, home.join("sandbox/config.toml"));
+        assert!(!resolved.to_str().unwrap().starts_with('~'));
+    }
+
+    #[test]
+    fn env_override_falls_back_to_parent_resolution_when_none() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path();
+        std::fs::create_dir(parent.join("vitalog")).unwrap();
+        std::fs::write(parent.join("vitalog/config.toml"), "").unwrap();
+
+        let resolved = resolve_config_path_with_env(None, parent);
+
+        assert_eq!(resolved, parent.join("vitalog/config.toml"));
+    }
+
+    #[test]
+    fn env_override_treats_empty_string_as_unset() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path();
+
+        let resolved = resolve_config_path_with_env(Some(""), parent);
+
+        assert_eq!(resolved, parent.join("vitalog/config.toml"));
+    }
+
+    #[test]
+    fn not_found_message_mentions_env_var_when_from_env_true() {
+        let msg = config_not_found_message(Path::new("/missing/sandbox.toml"), true);
+
+        assert!(
+            msg.contains("VITALOG_CONFIG"),
+            "expected message to mention env var: {msg}"
+        );
+        assert!(
+            msg.contains("/missing/sandbox.toml"),
+            "expected message to include the path: {msg}"
+        );
+        assert!(
+            !msg.contains("vitalog init"),
+            "env-overridden missing path should NOT suggest `vitalog init`: {msg}"
+        );
+    }
+
+    #[test]
+    fn not_found_message_suggests_init_when_from_env_false() {
+        let msg = config_not_found_message(Path::new("/home/u/.config/vitalog/config.toml"), false);
+
+        assert!(
+            msg.contains("vitalog init"),
+            "default missing path should suggest `vitalog init`: {msg}"
+        );
+        assert!(
+            !msg.contains("VITALOG_CONFIG"),
+            "default missing path should NOT mention env var: {msg}"
+        );
+    }
+
+    #[test]
+    fn env_override_does_not_consult_parent_when_set() {
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path();
+        // Set up a legacy daylog config in `parent`. If the env override
+        // is honored verbatim, this legacy file must NOT be picked up.
+        std::fs::create_dir(parent.join("daylog")).unwrap();
+        std::fs::write(parent.join("daylog/config.toml"), "").unwrap();
+
+        let resolved = resolve_config_path_with_env(Some("/explicit/override/config.toml"), parent);
+
+        assert_eq!(
+            resolved,
+            std::path::PathBuf::from("/explicit/override/config.toml")
+        );
     }
 }

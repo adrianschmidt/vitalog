@@ -314,6 +314,16 @@ rdl = { display = "RDL", color = "red" }
 
 Exercises, metrics, and colors hot-reload without restart. Module enable/disable requires restart.
 
+### Overriding the config path
+
+Set `$VITALOG_CONFIG` to a config.toml of your choice and `vitalog` will read from that file (and write to its `notes_dir`) instead of the platform default. Useful for sandbox/testing setups, or for running multiple parallel installs:
+
+```bash
+VITALOG_CONFIG=~/.vitalog-sandbox/config.toml vitalog bp 138 88 65 --morning
+```
+
+If the env var points to a file that doesn't exist, vitalog errors out rather than silently falling back to the default config — so a typo can't accidentally write to your real notes.
+
 ### Upgrading
 
 After upgrading vitalog, run `vitalog rebuild` to re-materialize all notes
