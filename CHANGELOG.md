@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/adrianschmidt/vitalog/compare/v1.3.2...v1.4.0) (2026-05-18)
+
+
+### Features
+
+* **config:** honor $VITALOG_CONFIG for sandbox configs ([3977439](https://github.com/adrianschmidt/vitalog/commit/39774394647d68a9963ed24ff4118f842e040647))
+
 ## [1.3.2](https://github.com/adrianschmidt/vitalog/compare/v1.3.1...v1.3.2) (2026-05-17)
 
 
