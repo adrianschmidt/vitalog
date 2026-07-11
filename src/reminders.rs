@@ -138,6 +138,8 @@ pub struct EvaluatedReminder {
     pub due: bool,
     pub not_before: Option<NaiveTime>,
     pub not_after: Option<NaiveTime>,
+    pub streak: Option<u32>,
+    pub days_past_due: Option<i64>,
 }
 
 /// Output of `evaluate`: evaluated reminders plus any soft warnings (e.g.
@@ -470,7 +472,8 @@ pub fn evaluate(
     let mut out = Vec::with_capacity(reminders.len());
     let mut warnings = Vec::new();
     for r in reminders {
-        let last_done = query_last_done(conn, &r.watch)?;
+        let dates = query_logged_dates(conn, &r.watch)?;
+        let last_done = dates.first().copied();
         if let WatchSource::Metric { id, .. } = &r.watch {
             if last_done.is_none() && !config.metrics.contains_key(id) {
                 warnings.push(format!(
@@ -486,6 +489,16 @@ pub fn evaluate(
         };
         let in_window = within_time_window(now, r.not_before, r.not_after, config.day_start_hour);
         let due = data_overdue && in_window;
+        let streak = if r.show_streak {
+            Some(compute_streak(&dates, today, r.interval_days))
+        } else {
+            None
+        };
+        let days_past_due = if r.show_days_past_due {
+            days_since.map(|n| (n - r.interval_days as i64).max(0))
+        } else {
+            None
+        };
         out.push(EvaluatedReminder {
             id: r.id.clone(),
             display: r.display.clone(),
@@ -495,6 +508,8 @@ pub fn evaluate(
             due,
             not_before: r.not_before,
             not_after: r.not_after,
+            streak,
+            days_past_due,
         });
     }
     Ok(EvaluationResult {
@@ -503,77 +518,111 @@ pub fn evaluate(
     })
 }
 
-/// Run one MAX(date) query per watch kind. Column names are taken from
-/// the closed enum variants — never substituted from user input — so
-/// `format!`-ing them into the SQL is safe.
-fn query_last_done(conn: &Connection, watch: &WatchSource) -> Result<Option<NaiveDate>> {
+/// Reads the `date` column of a row and parses it, folding an unparseable
+/// value into `Ok(None)` (silently dropped by the caller) rather than a
+/// query error — matching the pre-PR `query_last_done` behavior. Genuine
+/// row-fetch errors still propagate as `Err`.
+fn parse_date_row(row: &rusqlite::Row) -> rusqlite::Result<Option<NaiveDate>> {
+    let s: String = row.get(0)?;
+    Ok(NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok())
+}
+
+/// All distinct dates on which the watched thing was logged, most-recent
+/// first. Column names come from the closed watch enum (never user input),
+/// so `format!`-ing them into SQL is safe — the same guarantee the earlier
+/// single-date lookup relied on.
+fn query_logged_dates(conn: &Connection, watch: &WatchSource) -> Result<Vec<NaiveDate>> {
     use color_eyre::eyre::WrapErr;
 
-    let date_str: Option<String> = match watch {
+    let rows: Vec<NaiveDate> = match watch {
         WatchSource::Metric {
             id,
             count_zero_as_logged,
         } => {
             let zero_flag: i64 = if *count_zero_as_logged { 1 } else { 0 };
-            conn.query_row(
-                "SELECT MAX(date) FROM metrics WHERE name = ?1 AND (value > 0 OR ?2 = 1)",
-                rusqlite::params![id, zero_flag],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .wrap_err("Failed to query metrics for reminder")?
+            let msg = "Failed to query metrics for reminder";
+            let mut stmt = conn
+                .prepare(
+                    "SELECT DISTINCT date FROM metrics \
+                 WHERE name = ?1 AND (value > 0 OR ?2 = 1) ORDER BY date DESC",
+                )
+                .wrap_err(msg)?;
+            let it = stmt
+                .query_map(rusqlite::params![id, zero_flag], parse_date_row)
+                .wrap_err(msg)?;
+            it.filter_map(|r| r.transpose())
+                .collect::<rusqlite::Result<Vec<NaiveDate>>>()
+                .wrap_err(msg)?
         }
         WatchSource::Session(SessionMatch::TextEquals { column, value }) => {
+            let msg = "Failed to query sessions for reminder (text-equals)";
             let sql = format!(
-                "SELECT MAX(date) FROM sessions WHERE {} = ?1",
+                "SELECT DISTINCT date FROM sessions WHERE {} = ?1 ORDER BY date DESC",
                 column.sql_column()
             );
-            conn.query_row(&sql, [value], |row| row.get::<_, Option<String>>(0))
-                .wrap_err("Failed to query sessions for reminder (text-equals)")?
+            let mut stmt = conn.prepare(&sql).wrap_err(msg)?;
+            let it = stmt.query_map([value], parse_date_row).wrap_err(msg)?;
+            it.filter_map(|r| r.transpose())
+                .collect::<rusqlite::Result<Vec<NaiveDate>>>()
+                .wrap_err(msg)?
         }
         WatchSource::Session(SessionMatch::NumericAtLeast { column, min }) => {
+            let msg = "Failed to query sessions for reminder (numeric-at-least)";
             let sql = format!(
-                "SELECT MAX(date) FROM sessions WHERE {col} IS NOT NULL AND {col} >= ?1",
+                "SELECT DISTINCT date FROM sessions \
+                 WHERE {col} IS NOT NULL AND {col} >= ?1 ORDER BY date DESC",
                 col = column.sql_column()
             );
-            conn.query_row(&sql, rusqlite::params![min], |row| {
-                row.get::<_, Option<String>>(0)
-            })
-            .wrap_err("Failed to query sessions for reminder (numeric-at-least)")?
+            let mut stmt = conn.prepare(&sql).wrap_err(msg)?;
+            let it = stmt
+                .query_map(rusqlite::params![min], parse_date_row)
+                .wrap_err(msg)?;
+            it.filter_map(|r| r.transpose())
+                .collect::<rusqlite::Result<Vec<NaiveDate>>>()
+                .wrap_err(msg)?
         }
         WatchSource::Lift {
             exercise,
             min_weight,
             min_reps,
         } => {
-            let mut sql = String::from("SELECT MAX(date) FROM lift_sets WHERE exercise = ?1");
-            // We bind params in order; build the SQL conditionally to match.
+            let msg = "Failed to query lift_sets for reminder";
+            let mut sql = String::from("SELECT DISTINCT date FROM lift_sets WHERE exercise = ?1");
             let mut params: Vec<rusqlite::types::Value> =
                 vec![rusqlite::types::Value::Text(exercise.clone())];
             if let Some(w) = min_weight {
                 sql.push_str(&format!(" AND weight_lbs >= ?{}", params.len() + 1));
                 params.push(rusqlite::types::Value::Real(*w));
             }
-            if let Some(r) = min_reps {
+            if let Some(rp) = min_reps {
                 sql.push_str(&format!(" AND reps >= ?{}", params.len() + 1));
-                params.push(rusqlite::types::Value::Integer(*r as i64));
+                params.push(rusqlite::types::Value::Integer(*rp as i64));
             }
+            sql.push_str(" ORDER BY date DESC");
             let params_refs: Vec<&dyn rusqlite::ToSql> =
                 params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-            conn.query_row(&sql, params_refs.as_slice(), |row| {
-                row.get::<_, Option<String>>(0)
-            })
-            .wrap_err("Failed to query lift_sets for reminder")?
+            let mut stmt = conn.prepare(&sql).wrap_err(msg)?;
+            let it = stmt
+                .query_map(params_refs.as_slice(), parse_date_row)
+                .wrap_err(msg)?;
+            it.filter_map(|r| r.transpose())
+                .collect::<rusqlite::Result<Vec<NaiveDate>>>()
+                .wrap_err(msg)?
         }
         WatchSource::DayField(col) => {
+            let msg = "Failed to query days for reminder";
             let sql = format!(
-                "SELECT MAX(date) FROM days WHERE {} IS NOT NULL",
+                "SELECT DISTINCT date FROM days WHERE {} IS NOT NULL ORDER BY date DESC",
                 col.sql_column()
             );
-            conn.query_row(&sql, [], |row| row.get::<_, Option<String>>(0))
-                .wrap_err("Failed to query days for reminder")?
+            let mut stmt = conn.prepare(&sql).wrap_err(msg)?;
+            let it = stmt.query_map([], parse_date_row).wrap_err(msg)?;
+            it.filter_map(|r| r.transpose())
+                .collect::<rusqlite::Result<Vec<NaiveDate>>>()
+                .wrap_err(msg)?
         }
     };
-    Ok(date_str.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()))
+    Ok(rows)
 }
 
 /// Length of the current streak in *days*, per the cadence model in
@@ -1059,6 +1108,28 @@ show_days_past_due = false
             not_after: None,
             show_streak: false,
             show_days_past_due: false,
+        }
+    }
+
+    fn metric_reminder_with_toggles(
+        id: &str,
+        interval_days: u32,
+        metric: &str,
+        show_streak: bool,
+        show_days_past_due: bool,
+    ) -> Reminder {
+        Reminder {
+            id: id.into(),
+            display: id.into(),
+            interval_days,
+            watch: WatchSource::Metric {
+                id: metric.into(),
+                count_zero_as_logged: false,
+            },
+            not_before: None,
+            not_after: None,
+            show_streak,
+            show_days_past_due,
         }
     }
 
@@ -2069,5 +2140,62 @@ not_after = "06:00"
         let dates = vec![d("2026-05-05")];
         assert_eq!(compute_streak(&dates, d("2026-05-05"), u32::MAX), 1);
         assert_eq!(compute_streak(&dates, d("2026-05-05"), 4_000_000_000), 1);
+    }
+
+    #[test]
+    fn evaluate_populates_streak_when_enabled() {
+        let conn = make_test_db();
+        // interval 2, logged May 1/3/5.
+        for date in ["2026-05-01", "2026-05-03", "2026-05-05"] {
+            insert_metric(&conn, date, "la_min", 15.0);
+        }
+        let today = NaiveDate::from_ymd_opt(2026, 5, 6).unwrap();
+        let r = metric_reminder_with_toggles("la", 2, "la_min", true, false);
+        let result = evaluate(&conn, today, noon(), &[r], &empty_config()).unwrap();
+        assert_eq!(result.reminders[0].streak, Some(6));
+        assert_eq!(result.reminders[0].days_past_due, None); // toggle off
+    }
+
+    #[test]
+    fn evaluate_streak_none_when_disabled() {
+        let conn = make_test_db();
+        insert_metric(&conn, "2026-05-05", "la_min", 15.0);
+        let today = NaiveDate::from_ymd_opt(2026, 5, 5).unwrap();
+        let r = metric_reminder_with_toggles("la", 2, "la_min", false, false);
+        let result = evaluate(&conn, today, noon(), &[r], &empty_config()).unwrap();
+        assert_eq!(result.reminders[0].streak, None);
+    }
+
+    #[test]
+    fn evaluate_days_past_due_positive_when_overdue() {
+        let conn = make_test_db();
+        insert_metric(&conn, "2026-05-05", "la_min", 15.0);
+        // interval 2, today is 4 days later → days_since 4, past due by 2.
+        let today = NaiveDate::from_ymd_opt(2026, 5, 9).unwrap();
+        let r = metric_reminder_with_toggles("la", 2, "la_min", true, true);
+        let result = evaluate(&conn, today, noon(), &[r], &empty_config()).unwrap();
+        assert_eq!(result.reminders[0].days_past_due, Some(2));
+        assert_eq!(result.reminders[0].streak, Some(0)); // broken
+    }
+
+    #[test]
+    fn evaluate_days_past_due_zero_when_on_track() {
+        let conn = make_test_db();
+        insert_metric(&conn, "2026-05-05", "la_min", 15.0);
+        let today = NaiveDate::from_ymd_opt(2026, 5, 6).unwrap(); // days_since 1, interval 2
+        let r = metric_reminder_with_toggles("la", 2, "la_min", true, true);
+        let result = evaluate(&conn, today, noon(), &[r], &empty_config()).unwrap();
+        assert_eq!(result.reminders[0].days_past_due, Some(0));
+    }
+
+    #[test]
+    fn evaluate_days_past_due_none_when_never_logged() {
+        let conn = make_test_db();
+        let today = NaiveDate::from_ymd_opt(2026, 5, 6).unwrap();
+        let r = metric_reminder_with_toggles("la", 2, "la_min", true, true);
+        let result = evaluate(&conn, today, noon(), &[r], &empty_config()).unwrap();
+        assert_eq!(result.reminders[0].last_done, None);
+        assert_eq!(result.reminders[0].days_past_due, None); // no baseline
+        assert_eq!(result.reminders[0].streak, Some(0));
     }
 }
