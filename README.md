@@ -121,6 +121,37 @@ watch         = "metric"
 target        = "brushed_evening"
 ```
 
+**Streaks & days past due.** Vitalog tracks how many days in a row you've kept a
+reminder's cadence (a *streak*), and — opt-in — how far behind you are when you
+slip (*days past due*). Both are configurable globally and per-reminder:
+
+```toml
+[reminder_defaults]
+show_streak        = true      # default ON  (the motivating feature)
+show_days_past_due = false     # default OFF (opt-in; can demotivate)
+
+[reminders.lactic_acid]
+display            = "Lactic acid training"
+interval_days      = 2
+watch              = "metric"
+target             = "la_min"
+show_days_past_due = true       # per-reminder override wins over the default
+```
+
+Each completion earns `interval_days` days of streak credit (the day you did it
+plus the next `interval_days − 1` days), counted up to today. For an
+every-other-day habit done on the 1st/3rd/5th, the streak reads 5 on the 5th and
+6 on the 6th; it plateaus at 6 on the 7th until you log again (which makes it 7),
+and resets to 0 once you're more than `interval_days` behind. Daily habits get no
+free day, so they behave like a classic day-streak. `days_past_due` is
+`max(0, days_since − interval_days)`.
+
+Both `vitalog today --json` and `vitalog status` include `streak` and
+`days_past_due` on every reminder object (integer, or `null` when the toggle is
+off — and `days_past_due` is `null` for a never-logged reminder, which has no
+baseline). Handy for a notification script that phrases "🔥 6-day streak — don't
+break it now."
+
 A reminder fires when the most recent matching date is either absent or at least `interval_days` calendar days before today (respecting `day_start_hour`). The block is silent when nothing is due. Both `vitalog today --json` and `vitalog status` always include a `reminders` array (every configured reminder, due or not) plus a `reminder_warnings` sibling — handy for piping into a notification script.
 
 ## CLI

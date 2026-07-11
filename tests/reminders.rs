@@ -9,7 +9,7 @@ use vitalog::config::Config;
 use vitalog::db;
 use vitalog::goals::load_goals;
 use vitalog::modules;
-use vitalog::reminders::{evaluate, load_reminders};
+use vitalog::reminders::{evaluate, load_reminders, to_json};
 
 fn setup_with_reminders(reminders_toml: &str) -> (tempfile::TempDir, Config) {
     let dir = tempfile::TempDir::new().unwrap();
@@ -291,4 +291,51 @@ not_after = "23:00"
         block_in.contains("Brush teeth (evening)"),
         "block should show inside gate; got:\n{block_in}"
     );
+}
+
+#[test]
+fn streak_and_days_past_due_flow_end_to_end() {
+    let (dir, config) = setup_with_reminders(
+        r#"
+[reminder_defaults]
+show_streak = true
+show_days_past_due = true
+
+[reminders.lactic_acid]
+display = "Lactic acid training"
+interval_days = 2
+watch = "metric"
+target = "la_min"
+"#,
+    );
+
+    // interval 2, logged May 1/3/5 (an unbroken every-other-day chain).
+    for date in ["2026-05-01", "2026-05-03", "2026-05-05"] {
+        write_note(
+            dir.path(),
+            date,
+            &format!("---\ndate: {date}\nla_min: 15\n---\n\n## Food\n"),
+        );
+    }
+
+    let registry = modules::build_registry(&config);
+    let conn = db::open_rw(&config.db_path()).unwrap();
+    db::init_db(&conn, &registry).unwrap();
+    modules::validate_module_tables(&registry).unwrap();
+    vitalog::materializer::sync_all(&conn, &config.notes_dir_path(), &config, &registry).unwrap();
+
+    let reminders = load_reminders(&config).unwrap();
+    // "today" = May 6 → done yesterday, streak alive and credited through the 6th.
+    let today = NaiveDate::from_ymd_opt(2026, 5, 6).unwrap();
+    let noon = NaiveTime::from_hms_opt(12, 0, 0).unwrap();
+    let result = evaluate(&conn, today, noon, &reminders, &config).unwrap();
+
+    let r = &result.reminders[0];
+    assert_eq!(r.streak, Some(6));
+    assert_eq!(r.days_past_due, Some(0));
+
+    let (arr, _) = to_json(&result.reminders, &result.warnings);
+    let obj = &arr.as_array().unwrap()[0];
+    assert_eq!(obj["streak"], serde_json::json!(6));
+    assert_eq!(obj["days_past_due"], serde_json::json!(0));
 }
