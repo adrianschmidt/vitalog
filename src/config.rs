@@ -139,6 +139,8 @@ pub struct Config {
     #[serde(default)]
     pub reminders: HashMap<String, ReminderConfig>,
     #[serde(default)]
+    pub reminder_defaults: ReminderDefaultsConfig,
+    #[serde(default)]
     pub notes: NotesConfig,
     #[serde(default = "default_toml_table")]
     pub climbing: toml::Value,
@@ -210,6 +212,27 @@ pub struct ReminderConfig {
     pub not_before: Option<String>,
     #[serde(default)]
     pub not_after: Option<String>,
+    #[serde(default)]
+    pub show_streak: Option<bool>,
+    #[serde(default)]
+    pub show_days_past_due: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReminderDefaultsConfig {
+    #[serde(default = "default_true")]
+    pub show_streak: bool,
+    #[serde(default)]
+    pub show_days_past_due: bool,
+}
+
+impl Default for ReminderDefaultsConfig {
+    fn default() -> Self {
+        Self {
+            show_streak: true,
+            show_days_past_due: false,
+        }
+    }
 }
 
 impl Config {
@@ -623,6 +646,39 @@ med-evening = "Evening meds"
     fn notes_aliases_default_empty() {
         let config: Config = toml::from_str("notes_dir = '/tmp/test'\n").unwrap();
         assert!(config.notes.aliases.is_empty());
+    }
+
+    #[test]
+    fn reminder_defaults_absent_section_is_streak_on_past_due_off() {
+        let cfg: Config = toml::from_str(r#"notes_dir = "/tmp/x""#).unwrap();
+        assert!(cfg.reminder_defaults.show_streak);
+        assert!(!cfg.reminder_defaults.show_days_past_due);
+    }
+
+    #[test]
+    fn reminder_defaults_and_overrides_parse() {
+        let cfg: Config = toml::from_str(
+            r#"
+notes_dir = "/tmp/x"
+
+[reminder_defaults]
+show_streak = false
+show_days_past_due = true
+
+[reminders.foo]
+display = "Foo"
+interval_days = 1
+watch = "day_field"
+target = "weight"
+show_streak = true
+"#,
+        )
+        .unwrap();
+        assert!(!cfg.reminder_defaults.show_streak);
+        assert!(cfg.reminder_defaults.show_days_past_due);
+        let foo = &cfg.reminders["foo"];
+        assert_eq!(foo.show_streak, Some(true));
+        assert_eq!(foo.show_days_past_due, None);
     }
 }
 
