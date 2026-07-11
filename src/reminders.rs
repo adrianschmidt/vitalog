@@ -23,6 +23,8 @@ pub struct Reminder {
     pub watch: WatchSource,
     pub not_before: Option<NaiveTime>,
     pub not_after: Option<NaiveTime>,
+    pub show_streak: bool,
+    pub show_days_past_due: bool,
 }
 
 /// What the reminder watches. Each variant maps to one prepared query in
@@ -197,6 +199,12 @@ pub fn load_reminders(config: &Config) -> Result<Vec<Reminder>> {
                 );
             }
         }
+        let show_streak = cfg
+            .show_streak
+            .unwrap_or(config.reminder_defaults.show_streak);
+        let show_days_past_due = cfg
+            .show_days_past_due
+            .unwrap_or(config.reminder_defaults.show_days_past_due);
         out.push(Reminder {
             id: id.clone(),
             display: cfg.display.clone(),
@@ -204,6 +212,8 @@ pub fn load_reminders(config: &Config) -> Result<Vec<Reminder>> {
             watch,
             not_before,
             not_after,
+            show_streak,
+            show_days_past_due,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -943,6 +953,45 @@ target = "la_min"
         assert!(load_reminders(&cfg).unwrap().is_empty());
     }
 
+    #[test]
+    fn load_resolves_streak_toggles_from_defaults_and_overrides() {
+        let cfg: Config = toml::from_str(
+            r#"
+notes_dir = "/tmp/x"
+
+[metrics]
+la_min = { display = "LA", color = "red" }
+
+[reminder_defaults]
+show_streak = false
+show_days_past_due = true
+
+[reminders.uses_default]
+display = "Uses default"
+interval_days = 1
+watch = "metric"
+target = "la_min"
+
+[reminders.overrides]
+display = "Overrides"
+interval_days = 1
+watch = "metric"
+target = "la_min"
+show_streak = true
+show_days_past_due = false
+"#,
+        )
+        .unwrap();
+        let rs = load_reminders(&cfg).unwrap();
+        // load_reminders sorts by id: "overrides" then "uses_default".
+        let overrides = rs.iter().find(|r| r.id == "overrides").unwrap();
+        let uses_default = rs.iter().find(|r| r.id == "uses_default").unwrap();
+        assert!(overrides.show_streak);
+        assert!(!overrides.show_days_past_due);
+        assert!(!uses_default.show_streak);
+        assert!(uses_default.show_days_past_due);
+    }
+
     use rusqlite::Connection;
 
     /// Minimal in-memory DB with the tables `evaluate` reads.
@@ -1008,6 +1057,8 @@ target = "la_min"
             },
             not_before: None,
             not_after: None,
+            show_streak: false,
+            show_days_past_due: false,
         }
     }
 
@@ -1150,6 +1201,8 @@ la_min = { display = "LA", color = "red" }
             },
             not_before: None,
             not_after: None,
+            show_streak: false,
+            show_days_past_due: false,
         };
         let result = evaluate(&conn, today, noon(), &[reminder], &empty_config()).unwrap();
         assert_eq!(result.reminders[0].last_done, Some(today));
@@ -1187,6 +1240,8 @@ la_min = { display = "LA", color = "red" }
             }),
             not_before: None,
             not_after: None,
+            show_streak: false,
+            show_days_past_due: false,
         }
     }
 
@@ -1203,6 +1258,8 @@ la_min = { display = "LA", color = "red" }
             watch: WatchSource::Session(SessionMatch::NumericAtLeast { column, min }),
             not_before: None,
             not_after: None,
+            show_streak: false,
+            show_days_past_due: false,
         }
     }
 
@@ -1292,6 +1349,8 @@ la_min = { display = "LA", color = "red" }
             },
             not_before: None,
             not_after: None,
+            show_streak: false,
+            show_days_past_due: false,
         }
     }
 
@@ -1363,6 +1422,8 @@ la_min = { display = "LA", color = "red" }
             watch: WatchSource::DayField(col),
             not_before: None,
             not_after: None,
+            show_streak: false,
+            show_days_past_due: false,
         }
     }
 
@@ -1791,6 +1852,8 @@ not_after = "06:00"
             },
             not_before: Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap()),
             not_after: None,
+            show_streak: false,
+            show_days_past_due: false,
         };
         // Wall-clock 10:00 — before the gate.
         let now = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
@@ -1819,6 +1882,8 @@ not_after = "06:00"
             },
             not_before: Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap()),
             not_after: Some(NaiveTime::from_hms_opt(23, 0, 0).unwrap()),
+            show_streak: false,
+            show_days_past_due: false,
         };
         let now = NaiveTime::from_hms_opt(20, 0, 0).unwrap();
         let result = evaluate(&conn, today, now, &[r], &empty_config()).unwrap();
@@ -1840,6 +1905,8 @@ not_after = "06:00"
             },
             not_before: Some(NaiveTime::from_hms_opt(7, 0, 0).unwrap()),
             not_after: Some(NaiveTime::from_hms_opt(12, 0, 0).unwrap()),
+            show_streak: false,
+            show_days_past_due: false,
         };
         // Wall-clock 14:00 — past the upper bound.
         let now = NaiveTime::from_hms_opt(14, 0, 0).unwrap();
@@ -1863,6 +1930,8 @@ not_after = "06:00"
             },
             not_before: Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap()),
             not_after: None,
+            show_streak: false,
+            show_days_past_due: false,
         };
         let now = NaiveTime::from_hms_opt(20, 0, 0).unwrap();
         let result = evaluate(&conn, today, now, &[r], &empty_config()).unwrap();
@@ -1884,6 +1953,8 @@ not_after = "06:00"
             },
             not_before: Some(NaiveTime::from_hms_opt(18, 0, 0).unwrap()),
             not_after: None,
+            show_streak: false,
+            show_days_past_due: false,
         };
         let now = NaiveTime::from_hms_opt(10, 0, 0).unwrap();
         let result = evaluate(&conn, today, now, &[r], &empty_config()).unwrap();
@@ -1907,6 +1978,8 @@ not_after = "06:00"
             },
             not_before: Some(nb),
             not_after: Some(na),
+            show_streak: false,
+            show_days_past_due: false,
         };
         let result = evaluate(&conn, today, noon(), &[r], &empty_config()).unwrap();
         assert_eq!(result.reminders[0].not_before, Some(nb));
