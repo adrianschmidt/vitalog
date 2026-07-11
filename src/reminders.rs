@@ -4,7 +4,9 @@
 //! `lift_sets`, or a built-in `days` column. `evaluate` returns the most
 //! recent date the watched thing was logged (if any), and whether that
 //! gap is ≥ `interval_days` calendar days ago — in which case the
-//! reminder is "due".
+//! reminder is "due". When enabled per reminder, it also reports a
+//! cadence-aware `streak` (consecutive days keeping the habit; see
+//! `compute_streak`) and `days_past_due` (how far past the interval).
 //!
 //! Sibling to `goals.rs`. No new DB schema, no daemon-side state.
 
