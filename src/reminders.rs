@@ -566,6 +566,49 @@ fn query_last_done(conn: &Connection, watch: &WatchSource) -> Result<Option<Naiv
     Ok(date_str.and_then(|s| NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()))
 }
 
+/// Length of the current streak in *days*, per the cadence model in
+/// `docs/superpowers/specs/2026-07-11-reminder-streaks-and-days-past-due-design.md`.
+///
+/// `dates_desc` are the distinct qualifying completion dates, most-recent
+/// first. Returns 0 when there is no live streak: empty history, the most
+/// recent completion is in the future, or the streak has broken
+/// (`today - last_done > interval_days`).
+pub(crate) fn compute_streak(
+    dates_desc: &[NaiveDate],
+    today: NaiveDate,
+    interval_days: u32,
+) -> u32 {
+    let interval = interval_days as i64;
+    let last = match dates_desc.first() {
+        Some(d) => *d,
+        None => return 0,
+    };
+    let days_since = (today - last).num_days();
+    if days_since < 0 || days_since > interval {
+        return 0;
+    }
+    // Walk back through the run: consecutive completions stay in the same
+    // chain while the gap between them is ≤ interval.
+    let mut run_start = last;
+    let mut prev = last;
+    for &earlier in &dates_desc[1..] {
+        if (prev - earlier).num_days() <= interval {
+            run_start = earlier;
+            prev = earlier;
+        } else {
+            break;
+        }
+    }
+    // Each completion credits `interval` days (its own day + interval-1 more),
+    // capped at today — the streak never counts into the future. An absurdly
+    // large `interval_days` can push the credit date past `NaiveDate`'s
+    // representable range; fall back to `today` rather than panicking.
+    let credited_end = last
+        .checked_add_signed(chrono::Duration::days(interval - 1))
+        .map_or(today, |d| std::cmp::min(today, d));
+    ((credited_end - run_start).num_days() + 1) as u32
+}
+
 /// Build the JSON values for the `reminders` and `reminder_warnings` keys
 /// emitted by `vitalog today --json` and `vitalog status`. Lifted here so
 /// both surfaces agree on the per-reminder schema as fields evolve.
@@ -1868,5 +1911,90 @@ not_after = "06:00"
         let result = evaluate(&conn, today, noon(), &[r], &empty_config()).unwrap();
         assert_eq!(result.reminders[0].not_before, Some(nb));
         assert_eq!(result.reminders[0].not_after, Some(na));
+    }
+
+    fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn streak_every_other_day_worked_example() {
+        // interval 2, done May 1/3/5.
+        let dates = vec![d("2026-05-05"), d("2026-05-03"), d("2026-05-01")];
+        assert_eq!(compute_streak(&dates, d("2026-05-05"), 2), 5); // today 5th
+        assert_eq!(compute_streak(&dates, d("2026-05-06"), 2), 6); // 5th bought the 6th
+        assert_eq!(compute_streak(&dates, d("2026-05-07"), 2), 6); // plateau, not yet logged
+        assert_eq!(compute_streak(&dates, d("2026-05-08"), 2), 0); // broken (days_since 3 > 2)
+    }
+
+    #[test]
+    fn streak_logging_the_plateau_day_advances_it() {
+        // interval 2, done May 1/3/5/7, today 7th.
+        let dates = vec![
+            d("2026-05-07"),
+            d("2026-05-05"),
+            d("2026-05-03"),
+            d("2026-05-01"),
+        ];
+        assert_eq!(compute_streak(&dates, d("2026-05-07"), 2), 7);
+    }
+
+    #[test]
+    fn streak_logging_early_earns_nothing_extra() {
+        // interval 2, done May 1/3/5/6, today 6th → still 6.
+        let dates = vec![
+            d("2026-05-06"),
+            d("2026-05-05"),
+            d("2026-05-03"),
+            d("2026-05-01"),
+        ];
+        assert_eq!(compute_streak(&dates, d("2026-05-06"), 2), 6);
+    }
+
+    #[test]
+    fn streak_daily_behaves_like_duolingo() {
+        // interval 1, done May 1..5.
+        let dates = vec![
+            d("2026-05-05"),
+            d("2026-05-04"),
+            d("2026-05-03"),
+            d("2026-05-02"),
+            d("2026-05-01"),
+        ];
+        assert_eq!(compute_streak(&dates, d("2026-05-05"), 1), 5); // logged today
+        assert_eq!(compute_streak(&dates, d("2026-05-06"), 1), 5); // done yesterday, plateau
+        assert_eq!(compute_streak(&dates, d("2026-05-07"), 1), 0); // missed a full day → broken
+    }
+
+    #[test]
+    fn streak_gap_exactly_interval_chains_one_more_breaks() {
+        // interval 2. Chain 1,3 (gap 2 chains). Add an earlier 0 with gap 3 → breaks the chain there.
+        let chained = vec![d("2026-05-03"), d("2026-05-01")];
+        assert_eq!(compute_streak(&chained, d("2026-05-03"), 2), 3); // run_start = May 1
+        let broken_earlier = vec![d("2026-05-03"), d("2026-05-01"), d("2026-04-28")];
+        // Apr 28 → May 1 gap is 3 (> 2): run_start stays May 1, streak unchanged.
+        assert_eq!(compute_streak(&broken_earlier, d("2026-05-03"), 2), 3);
+    }
+
+    #[test]
+    fn streak_empty_and_single() {
+        assert_eq!(compute_streak(&[], d("2026-05-05"), 2), 0);
+        assert_eq!(compute_streak(&[d("2026-05-05")], d("2026-05-05"), 2), 1); // single completion today
+    }
+
+    #[test]
+    fn streak_future_most_recent_is_zero() {
+        // Guard: a completion dated after `today` yields no streak.
+        assert_eq!(compute_streak(&[d("2026-05-10")], d("2026-05-05"), 2), 0);
+    }
+
+    #[test]
+    fn streak_survives_absurd_interval_days_without_panic() {
+        // An unbounded `interval_days` (e.g. a config typo) must not panic
+        // when added to `last` — `checked_add_signed` should fall back to
+        // `today` instead of overflowing `NaiveDate`'s representable range.
+        let dates = vec![d("2026-05-05")];
+        assert_eq!(compute_streak(&dates, d("2026-05-05"), u32::MAX), 1);
+        assert_eq!(compute_streak(&dates, d("2026-05-05"), 4_000_000_000), 1);
     }
 }
