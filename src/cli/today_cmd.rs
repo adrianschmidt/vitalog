@@ -1501,6 +1501,8 @@ mod tests {
             due,
             not_before: None,
             not_after: None,
+            streak: None,
+            days_past_due: None,
         }
     }
 
@@ -1708,6 +1710,8 @@ mod tests {
             due: false,
             not_before: Some(chrono::NaiveTime::from_hms_opt(18, 0, 0).unwrap()),
             not_after: Some(chrono::NaiveTime::from_hms_opt(23, 0, 0).unwrap()),
+            streak: None,
+            days_past_due: None,
         }];
         let v = render_json_with_reminders(&s, &g, &rs, &[]);
         let r = &v["reminders"][0];
@@ -1728,6 +1732,8 @@ mod tests {
             due: true,
             not_before: None,
             not_after: None,
+            streak: None,
+            days_past_due: None,
         }];
         let v = render_json_with_reminders(&s, &g, &rs, &[]);
         let r = &v["reminders"][0];
