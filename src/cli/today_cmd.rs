@@ -344,12 +344,22 @@ pub fn render_reminders_block(
     for r in due {
         let line = match (r.days_since, r.last_done) {
             (Some(n), Some(d)) => {
-                let plural = if n == 1 { "" } else { "s" };
-                format!(
-                    "- {} — overdue ({n} day{plural} ago, {})",
-                    r.display,
-                    d.format("%Y-%m-%d")
-                )
+                if let Some(k) = r.streak.filter(|k| *k >= 1) {
+                    format!(
+                        "- {} — due today · 🔥 {k}-day streak (keep it alive)",
+                        r.display
+                    )
+                } else if let Some(k) = r.days_past_due.filter(|k| *k >= 1) {
+                    let plural = if k == 1 { "" } else { "s" };
+                    format!("- {} — {k} day{plural} past due", r.display)
+                } else {
+                    let plural = if n == 1 { "" } else { "s" };
+                    format!(
+                        "- {} — overdue ({n} day{plural} ago, {})",
+                        r.display,
+                        d.format("%Y-%m-%d")
+                    )
+                }
             }
             _ => format!("- {} — never logged", r.display),
         };
@@ -1504,6 +1514,83 @@ mod tests {
             streak: None,
             days_past_due: None,
         }
+    }
+
+    fn due_reminder(
+        display: &str,
+        days_since: i64,
+        last_done: &str,
+        streak: Option<u32>,
+        days_past_due: Option<i64>,
+    ) -> crate::reminders::EvaluatedReminder {
+        crate::reminders::EvaluatedReminder {
+            id: display.to_lowercase().replace(' ', "_"),
+            display: display.into(),
+            interval_days: 2,
+            last_done: Some(chrono::NaiveDate::parse_from_str(last_done, "%Y-%m-%d").unwrap()),
+            days_since: Some(days_since),
+            due: true,
+            not_before: None,
+            not_after: None,
+            streak,
+            days_past_due,
+        }
+    }
+
+    #[test]
+    fn reminders_block_shows_alive_streak_on_due_line() {
+        let r = due_reminder("Lactic acid training", 2, "2026-05-05", Some(6), Some(0));
+        let out = render_reminders_block(&[r], false);
+        assert!(
+            out.contains("Lactic acid training — due today · 🔥 6-day streak (keep it alive)"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn reminders_block_shows_days_past_due_when_enabled() {
+        // Broken streak (Some(0)), past due by 3, toggle on.
+        let r = due_reminder("Deadlifts", 5, "2026-05-01", Some(0), Some(3));
+        let out = render_reminders_block(&[r], false);
+        assert!(out.contains("Deadlifts — 3 days past due"), "got: {out}");
+    }
+
+    #[test]
+    fn reminders_block_shows_singular_day_past_due() {
+        // Broken streak (Some(0)), past due by exactly 1 → singular wording.
+        let r = due_reminder("Deadlifts", 3, "2026-05-01", Some(0), Some(1));
+        let out = render_reminders_block(&[r], false);
+        assert!(out.contains("Deadlifts — 1 day past due"), "got: {out}");
+        assert!(!out.contains("1 days past due"), "got: {out}");
+    }
+
+    #[test]
+    fn reminders_block_falls_back_to_overdue_when_toggles_off() {
+        // No streak, no days_past_due → existing wording.
+        let r = due_reminder("Zone 2", 4, "2026-05-05", None, None);
+        let out = render_reminders_block(&[r], false);
+        assert!(
+            out.contains("Zone 2 — overdue (4 days ago, 2026-05-05)"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn reminders_block_never_logged_unchanged() {
+        let r = crate::reminders::EvaluatedReminder {
+            id: "weigh_in".into(),
+            display: "Daily weigh-in".into(),
+            interval_days: 1,
+            last_done: None,
+            days_since: None,
+            due: true,
+            not_before: None,
+            not_after: None,
+            streak: Some(0),
+            days_past_due: None,
+        };
+        let out = render_reminders_block(&[r], false);
+        assert!(out.contains("Daily weigh-in — never logged"), "got: {out}");
     }
 
     #[test]
