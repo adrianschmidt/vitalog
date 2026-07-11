@@ -687,6 +687,8 @@ pub fn to_json(
                 "due": r.due,
                 "not_before": r.not_before.map(|t| t.format("%H:%M").to_string()),
                 "not_after": r.not_after.map(|t| t.format("%H:%M").to_string()),
+                "streak": r.streak,
+                "days_past_due": r.days_past_due,
             })
         })
         .collect();
@@ -2197,5 +2199,45 @@ not_after = "06:00"
         assert_eq!(result.reminders[0].last_done, None);
         assert_eq!(result.reminders[0].days_past_due, None); // no baseline
         assert_eq!(result.reminders[0].streak, Some(0));
+    }
+
+    #[test]
+    fn to_json_includes_streak_and_days_past_due() {
+        let r = EvaluatedReminder {
+            id: "la".into(),
+            display: "LA".into(),
+            interval_days: 2,
+            last_done: Some(NaiveDate::from_ymd_opt(2026, 5, 5).unwrap()),
+            days_since: Some(1),
+            due: false,
+            not_before: None,
+            not_after: None,
+            streak: Some(6),
+            days_past_due: Some(0),
+        };
+        let (arr, _warns) = to_json(&[r], &[]);
+        let obj = &arr.as_array().unwrap()[0];
+        assert_eq!(obj["streak"], serde_json::json!(6));
+        assert_eq!(obj["days_past_due"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn to_json_null_when_toggles_off() {
+        let r = EvaluatedReminder {
+            id: "la".into(),
+            display: "LA".into(),
+            interval_days: 2,
+            last_done: Some(NaiveDate::from_ymd_opt(2026, 5, 5).unwrap()),
+            days_since: Some(1),
+            due: false,
+            not_before: None,
+            not_after: None,
+            streak: None,
+            days_past_due: None,
+        };
+        let (arr, _warns) = to_json(&[r], &[]);
+        let obj = &arr.as_array().unwrap()[0];
+        assert!(obj["streak"].is_null());
+        assert!(obj["days_past_due"].is_null());
     }
 }
