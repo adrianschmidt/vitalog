@@ -1,3 +1,15 @@
+# [1.5.0](https://github.com/adrianschmidt/vitalog/compare/v1.4.0...v1.5.0) (2026-07-12)
+
+
+### Features
+
+* **reminders:** compute_streak cadence-aware day counter ([6957fad](https://github.com/adrianschmidt/vitalog/commit/6957fadd51406e078858979e230c4aa8b3d6a7ba))
+* **reminders:** config toggles for streak and days-past-due ([4c48cd4](https://github.com/adrianschmidt/vitalog/commit/4c48cd4cb0ff41a49d365fe87dac23df820592a0))
+* **reminders:** emit streak and days-past-due in reminders JSON ([8090cd6](https://github.com/adrianschmidt/vitalog/commit/8090cd660115f96b182a34f8c648886d2e3126ad))
+* **reminders:** evaluate streak and days-past-due from history ([ad03a03](https://github.com/adrianschmidt/vitalog/commit/ad03a0315dbeb2a8017e6b9e511c1f328569337c))
+* **reminders:** resolve streak toggles onto Reminder ([6bec816](https://github.com/adrianschmidt/vitalog/commit/6bec816a75947b1196b70cbf49f48ba66131d35c))
+* **reminders:** show streak and days-past-due in today block ([0823b7c](https://github.com/adrianschmidt/vitalog/commit/0823b7c6786a841beee6d137751fed8c34a925e6))
+
 # [1.4.0](https://github.com/adrianschmidt/vitalog/compare/v1.3.2...v1.4.0) (2026-05-18)
 
 

@@ -1,6 +1,6 @@
 [package]
 name = "vitalog"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 description = "A terminal dashboard that tracks your life from markdown notes"
 license = "MIT"
