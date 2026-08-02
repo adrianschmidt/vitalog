@@ -800,7 +800,7 @@ fn trim_num(v: f64) -> String {
 /// zero, two when one decimal does as well.
 ///
 /// Two is where it stops, because two is what salt is stored at
-/// (`format_salt_grams`) — a total assembled from hundredths cannot land
+/// (`render_salt_grams`) — a total assembled from hundredths cannot land
 /// strictly between zero and 0.005 of a cap except through float noise, so
 /// a third decimal would only ever print rounding error. That noise is
 /// what the remaining degenerate band renders: a delta under 0.005 still

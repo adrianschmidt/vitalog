@@ -218,20 +218,21 @@ fn parse_food_line(line: &str) -> Option<ParsedLine> {
         // forgery this anchoring exists to prevent lives entirely in that
         // path; the macros were never distinguishable from unknown anyway,
         // since a missing macro token already reads as 0.0.
-        None => Some(ParsedLine {
-            kcal: extract_number_before(line, " kcal")?,
-            protein: extract_number_before(line, "g protein").unwrap_or(0.0),
-            carbs: extract_number_before(line, "g carbs").unwrap_or(0.0),
-            fat: extract_number_before(line, "g fat").unwrap_or(0.0),
-            fiber: None,
-            salt: None,
-        }),
+        None => {
+            let whole_line =
+                |which: Nutrient| extract_number_before(line, NUTRIENTS[which as usize].token);
+            Some(ParsedLine {
+                kcal: whole_line(Nutrient::Kcal)?,
+                protein: whole_line(Nutrient::Protein).unwrap_or(0.0),
+                carbs: whole_line(Nutrient::Carbs).unwrap_or(0.0),
+                fat: whole_line(Nutrient::Fat).unwrap_or(0.0),
+                fiber: None,
+                salt: None,
+            })
+        }
     }
 }
 
-/// The six tokens `format_nutrient_segment` writes, in the order it writes
-/// them. The anchor search below reads this list, so a nutrient added to
-/// the formatter is added here once.
 /// One nutrient, as the formatter writes it and the reader matches it.
 ///
 /// The writer and the reader are inverses, and this table is the single
@@ -244,7 +245,7 @@ fn parse_food_line(line: &str) -> Option<ParsedLine> {
 /// `format!` calls, a separate token list here, the reader's per-token
 /// decimal counts, and an ordering expressed once as push order and once as
 /// integer ranks. Nothing failed to compile when those disagreed and the
-/// failure was silent — changing `format_salt_grams` to strip both trailing
+/// failure was silent — changing `render_salt_grams` to strip both trailing
 /// zeros would have left `1.25` parsing while every whole-gram salt entry
 /// read as unknown, switching the feature off for exactly the entries that
 /// look most ordinary.
@@ -253,11 +254,6 @@ fn parse_food_line(line: &str) -> Option<ParsedLine> {
 /// reader requires.
 pub(crate) struct NutrientSpec {
     pub token: &'static str,
-    /// Fewest and most digits `render` can put after the point. Only salt
-    /// spans a range: `format_salt_grams` strips a single trailing zero, so
-    /// `1.25` keeps both digits while `2.00` becomes `2.0`.
-    pub min_decimals: usize,
-    pub max_decimals: usize,
     pub render: fn(f64) -> String,
 }
 
@@ -274,41 +270,45 @@ pub(crate) enum Nutrient {
     Salt = 5,
 }
 
+impl Nutrient {
+    /// In the order the formatter emits them, which is [`NUTRIENTS`]' order.
+    pub const ALL: [Nutrient; NUTRIENTS.len()] = [
+        Nutrient::Kcal,
+        Nutrient::Protein,
+        Nutrient::Carbs,
+        Nutrient::Fat,
+        Nutrient::Fiber,
+        Nutrient::Salt,
+    ];
+
+    pub fn spec(self) -> &'static NutrientSpec {
+        &NUTRIENTS[self as usize]
+    }
+}
+
 pub(crate) const NUTRIENTS: [NutrientSpec; 6] = [
     NutrientSpec {
         token: " kcal",
-        min_decimals: 0,
-        max_decimals: 0,
         render: render_kcal,
     },
     NutrientSpec {
         token: "g protein",
-        min_decimals: 1,
-        max_decimals: 1,
         render: render_grams,
     },
     NutrientSpec {
         token: "g carbs",
-        min_decimals: 1,
-        max_decimals: 1,
         render: render_grams,
     },
     NutrientSpec {
         token: "g fat",
-        min_decimals: 1,
-        max_decimals: 1,
         render: render_grams,
     },
     NutrientSpec {
         token: "g fiber",
-        min_decimals: 1,
-        max_decimals: 1,
         render: render_grams,
     },
     NutrientSpec {
         token: "g salt",
-        min_decimals: 1,
-        max_decimals: 2,
         render: render_salt_grams,
     },
 ];
@@ -349,7 +349,7 @@ fn render_salt_grams(v: f64) -> String {
 /// Deciding whether what it finds is a *measurement* is the half that
 /// matters, and `machine_nutrients` answers it by exact match against the
 /// formatter's own grammar rather than by judging the text. See there.
-fn machine_segment(line: &str) -> Option<[Option<f64>; 6]> {
+fn machine_segment(line: &str) -> Option<[Option<f64>; NUTRIENTS.len()]> {
     let anchor = NUTRIENTS.iter().filter_map(|n| line.rfind(n.token)).max()?;
     // The `(` the token is inside: walking left, each `)` claims the `(`
     // that matches it, so the first unclaimed `(` is the innermost opener
@@ -404,8 +404,8 @@ fn machine_segment(line: &str) -> Option<[Option<f64>; 6]> {
 /// the whole line in `parse_food_line`'s other arm, exactly as they did
 /// before any of this, so nothing a legacy line used to count stops
 /// counting.
-fn machine_nutrients(s: &str) -> Option<[Option<f64>; 6]> {
-    let mut values: [Option<f64>; 6] = [None; 6];
+fn machine_nutrients(s: &str) -> Option<[Option<f64>; NUTRIENTS.len()]> {
+    let mut values: [Option<f64>; NUTRIENTS.len()] = [None; NUTRIENTS.len()];
     let mut next = 0usize;
     for item in s.split(", ") {
         // Only tokens at or after `next` are eligible, which enforces the
@@ -416,7 +416,7 @@ fn machine_nutrients(s: &str) -> Option<[Option<f64>; 6]> {
             .skip(next)
             .find(|(_, spec)| item.ends_with(spec.token))?;
         let digits = item.strip_suffix(spec.token)?;
-        values[i] = Some(decimals(digits, spec.min_decimals, spec.max_decimals)?);
+        values[i] = Some(machine_digits(spec, digits)?);
         next = i + 1;
     }
     // `next` only advances when an item parsed, so this rejects the empty
@@ -424,19 +424,35 @@ fn machine_nutrients(s: &str) -> Option<[Option<f64>; 6]> {
     (next > 0).then_some(values)
 }
 
-/// Parse `s` as a non-negative decimal with between `min` and `max` digits
-/// after the point, and at least one before it. Rejects a sign, a leading
-/// `~`, whitespace, and anything else `format!` would not have produced.
-fn decimals(s: &str, min: usize, max: usize) -> Option<f64> {
-    let (int, frac) = match s.split_once('.') {
+/// Parse `digits` as exactly the string `spec.render` produces for the value
+/// they denote, or return `None`.
+///
+/// Two tests, and both are load-bearing. The character test rejects what
+/// `format!` cannot emit at all — a sign, whitespace, a `~`, an exponent.
+/// It cannot be dropped in favour of the re-render test alone, because
+/// `render` is not injective over strings it never writes: `render_grams`
+/// turns `-5.0` back into `"-5.0"`, so a hand-written negative would compare
+/// equal to itself and be accepted as a measurement.
+///
+/// The re-render test then requires the digits to be *precisely* what the
+/// formatter writes for that value, which is what makes "the formatter wrote
+/// this" literally true rather than approximately so. It is also the only
+/// statement of precision anywhere: `render` is the single definition, and a
+/// reader that asks it directly cannot disagree with it. Stating the decimal
+/// counts separately, as this function used to, left `2.00g salt`, `0300 kcal`
+/// and `300. kcal` parsing — none of which the formatter can produce — and
+/// let a 400-digit kcal token through as `inf`.
+fn machine_digits(spec: &NutrientSpec, digits: &str) -> Option<f64> {
+    let (int, frac) = match digits.split_once('.') {
         Some((i, f)) => (i, f),
-        None => (s, ""),
+        None => (digits, ""),
     };
-    let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
-    if !digits(int) || (!frac.is_empty() && !digits(frac)) {
+    let all_digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+    if !all_digits(int) || (!frac.is_empty() && !all_digits(frac)) {
         return None;
     }
-    (min..=max).contains(&frac.len()).then(|| s.parse().ok())?
+    let value: f64 = digits.parse().ok()?;
+    ((spec.render)(value) == digits).then_some(value)
 }
 
 /// Find the rightmost occurrence of `suffix` in `s`, then walk backwards
@@ -460,7 +476,15 @@ fn extract_number_before(s: &str, suffix: &str) -> Option<f64> {
     if start == end {
         return None;
     }
-    std::str::from_utf8(&before[start..end]).ok()?.parse().ok()
+    let value: f64 = std::str::from_utf8(&before[start..end])
+        .ok()?
+        .parse()
+        .ok()?;
+    // A run of digits long enough to overflow parses to `inf` rather than
+    // failing, and an infinite macro poisons the whole day — `Today so far:
+    // inf kcal`. No line the formatter wrote can reach this, so declining it
+    // costs nothing and keeps the totals finite.
+    value.is_finite().then_some(value)
 }
 
 #[cfg(test)]
@@ -1009,7 +1033,7 @@ mod tests {
         // The acceptance rule in one place: a group parses iff
         // `format_nutrient_segment` could have written it — every item, its
         // digits, and its position. Salt carries one or two decimals
-        // (`format_salt_grams` strips a single trailing zero); everything
+        // (`render_salt_grams` strips a single trailing zero); everything
         // else is fixed.
         for (label, line, fiber, salt) in [
             (
@@ -1184,7 +1208,7 @@ mod tests {
         // hand — a kcal-less group, and a nutrient subset — so the sweep
         // covers the option lattice instead of a few chosen lines.
         //
-        // Salt is the interesting axis: `format_salt_grams` emits `{:.2}`
+        // Salt is the interesting axis: `render_salt_grams` emits `{:.2}`
         // less a single stripped trailing zero, so it produces one *or* two
         // decimals and the reader has to accept both. 2.0 becomes "2.0";
         // 1.25 stays "1.25"; 0.05 stays "0.05".
@@ -1271,5 +1295,59 @@ mod tests {
         assert_eq!(render_salt_grams(0.0), "0.0");
         assert_eq!(render_salt_grams(0.02), "0.02");
         assert_eq!(render_salt_grams(2.25), "2.25");
+    }
+
+    #[test]
+    fn only_the_exact_digits_the_formatter_writes_are_accepted() {
+        // Checking a decimal *count* rather than the rendered string left
+        // three shapes parsing that `format_nutrient_segment` cannot emit,
+        // so a hand-written token was read as a measurement. Asking `render`
+        // directly is what makes "the formatter wrote this" literally true.
+        //
+        // The character test is still needed alongside it: `render_grams`
+        // turns -5.0 back into "-5.0", so a re-render comparison on its own
+        // would accept a hand-written negative as equal to itself.
+        for (label, seg) in [
+            ("a second decimal salt never keeps", "300 kcal, 2.00g salt"),
+            ("a leading zero on kcal", "0300 kcal, 2.0g salt"),
+            ("a trailing point on kcal", "300. kcal, 2.0g salt"),
+            ("a sign", "300 kcal, -5.0g salt"),
+            (
+                "a whole-gram salt written to two places",
+                "300 kcal, 2.50g salt",
+            ),
+        ] {
+            let md = format!("## Food\n- **08:00** X ({seg})\n");
+            let r = sum_food_section(&md);
+            assert_eq!(r.salt.unknown, 1, "{label}: {seg} -> {:?}", r.salt);
+            assert_eq!(r.salt.sum, 0.0, "{label}: {seg}");
+        }
+
+        // …while everything the formatter does write still reads back, on
+        // both sides of the trailing-zero strip.
+        for (seg, expected) in [
+            ("300 kcal, 2.0g salt", 2.0),
+            ("300 kcal, 1.25g salt", 1.25),
+            ("300 kcal, 0.05g salt", 0.05),
+            ("300 kcal, 10.0g salt", 10.0),
+        ] {
+            let md = format!("## Food\n- **08:00** X ({seg})\n");
+            let r = sum_food_section(&md);
+            assert_eq!(r.salt.unknown, 0, "{seg} -> {:?}", r.salt);
+            assert!(
+                (r.salt.sum - expected).abs() < 1e-9,
+                "{seg} -> {:?}",
+                r.salt
+            );
+        }
+
+        // A token so long it overflows to infinity is not a number the
+        // formatter could have produced either, so the line is declined
+        // rather than counted with an infinite total.
+        let huge = "9".repeat(400);
+        let md = format!("## Food\n- **08:00** X ({huge} kcal, 2.0g salt)\n");
+        let r = sum_food_section(&md);
+        assert_eq!(r.entry_count, 0, "got kcal={}", r.kcal);
+        assert_eq!(r.skipped_lines, 1);
     }
 }

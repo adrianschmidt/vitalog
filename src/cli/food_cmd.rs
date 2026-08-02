@@ -191,7 +191,7 @@ pub fn render_lookup(food: &FoodLookup, amount: Option<Amount>) -> Result<Render
     // infinity, and that product is what reaches the line.
     validate_db_nutrient(food.gl_per_100g, "gl_per_100g", &food.name)?;
     validate_db_nutrient(food.gl_per_100ml, "gl_per_100ml", &food.name)?;
-    validate_db_nutrient(entry.gl, "gl", &food.name)?;
+    validate_resolved_gl(entry.gl, &food.name)?;
     Ok(entry)
 }
 
@@ -243,7 +243,14 @@ fn render_with_amount(food: &FoodLookup, amount: Amount) -> Result<RenderedEntry
     let (panel, factor, panel_kind) = match amount.unit {
         AmountUnit::Gram => match (&food.per_100g, &food.per_100ml, food.density_g_per_ml) {
             (Some(p), _, _) => (p, amount.value / 100.0, PanelKind::Per100g),
-            (None, Some(p), Some(d)) if d > 0.0 => {
+            // `is_finite` as well as `> 0.0`: `+inf` passes the bare
+            // comparison and collapses `factor` to zero, which writes a full
+            // panel of `0.0g` tokens that read back as *measured* zeros — the
+            // one state the unknown counting exists to prevent. The ingest
+            // check in `nutrition.rs` rejects it too, but `vitalog food` never
+            // syncs, so between a stale db and the next `sync` this is the
+            // only guard.
+            (None, Some(p), Some(d)) if d.is_finite() && d > 0.0 => {
                 // Solid input on liquid-only food via density: g → ml.
                 let ml = amount.value / d;
                 (p, ml / 100.0, PanelKind::Per100ml)
@@ -264,7 +271,8 @@ fn render_with_amount(food: &FoodLookup, amount: Amount) -> Result<RenderedEntry
         },
         AmountUnit::Milliliter => match (&food.per_100ml, &food.per_100g, food.density_g_per_ml) {
             (Some(p), _, _) => (p, amount.value / 100.0, PanelKind::Per100ml),
-            (None, Some(p), Some(d)) if d > 0.0 => {
+            // See the gram arm: `+inf` passes `> 0.0` and zeroes the panel.
+            (None, Some(p), Some(d)) if d.is_finite() && d > 0.0 => {
                 // Liquid input on solid-only food via density: ml → g.
                 let g = amount.value * d;
                 (p, g / 100.0, PanelKind::Per100g)
@@ -362,29 +370,33 @@ fn format_amount(value: f64, unit: &str) -> String {
 }
 
 fn format_nutrient_segment(entry: &RenderedEntry) -> String {
-    // The one place that maps `RenderedEntry`'s fields onto the shared
-    // table's order. Everything else about how a nutrient is written — its
-    // token, its precision, its position — lives in `NUTRIENTS`, which
-    // `machine_nutrients` reads back through, so the writer and the reader
-    // cannot disagree.
+    use crate::food_sum::Nutrient;
+    // Exhaustive over `Nutrient` on purpose: a seventh nutrient added to the
+    // table stops compiling here until it is given a field, rather than
+    // being silently omitted from every line vitalog writes. Everything else
+    // about how a nutrient is written — its token, its precision, its
+    // position — lives in `NUTRIENTS`, which `machine_nutrients` reads back
+    // through, so the writer and the reader cannot disagree.
     //
     // Fiber inherits `render_grams`' one decimal rather than salt's two, and
     // with it that precision's failure mode in miniature: a scaled entry
     // under 0.05 g — 0.5 g/100 g at a 5 g amount — is written `0.0g fiber`
     // and read back as a measured zero. See `render_salt_grams` for why the
     // extra digit is bought for salt and not here.
-    let values = [
-        entry.kcal,
-        entry.protein,
-        entry.carbs,
-        entry.fat,
-        entry.fiber,
-        entry.salt,
-    ];
-    values
+    let value_of = |n: Nutrient| match n {
+        Nutrient::Kcal => entry.kcal,
+        Nutrient::Protein => entry.protein,
+        Nutrient::Carbs => entry.carbs,
+        Nutrient::Fat => entry.fat,
+        Nutrient::Fiber => entry.fiber,
+        Nutrient::Salt => entry.salt,
+    };
+    Nutrient::ALL
         .iter()
-        .zip(crate::food_sum::NUTRIENTS.iter())
-        .filter_map(|(value, spec)| value.map(|v| format!("{}{}", (spec.render)(v), spec.token)))
+        .filter_map(|&n| {
+            let spec = n.spec();
+            value_of(n).map(|v| format!("{}{}", (spec.render)(v), spec.token))
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -482,6 +494,13 @@ pub fn execute(
         apply_lookup_overrides(&mut entry, &nutrients);
         entry
     };
+    // GL is the one figure computed after `render_lookup`'s screen has run —
+    // `render_custom`'s `auto_gl` never passes through it, and
+    // `apply_lookup_overrides` recomputes it from an overridden `--gi`. Both
+    // multiply two screened finite values, whose product can still be
+    // infinite. Screening here is what makes the guard's completeness true
+    // rather than nearly true.
+    validate_resolved_gl(entry.gl, name)?;
 
     let line = format_line(&entry, &formatted_time);
 
@@ -659,6 +678,33 @@ fn validate_db_nutrient(value: Option<f64>, field: &str, food: &str) -> Result<(
     ))
     .suggestion(format!(
         "Fix the `{field}:` key for '{food}' in nutrition-db.md."
+    ))
+}
+
+/// The resolved glycemic load, which unlike every other screened figure has
+/// no key of its own to name.
+///
+/// `gl` is whichever of `gl_per_100g` / `gl_per_100ml` applies, or `gi ×
+/// carbs` when neither is set, so `validate_db_nutrient`'s message — "fix the
+/// `gl:` key" — would send a user to add a key `KNOWN_TOP_LEVEL_KEYS` does not
+/// have, get `unknown key 'gl' ignored`, and still see the original error.
+/// The source columns are screened first and give the actionable error; this
+/// one only fires when finite inputs overflow, so it names the inputs instead.
+fn validate_resolved_gl(value: Option<f64>, food: &str) -> Result<()> {
+    let Some(v) = value else { return Ok(()) };
+    if v.is_finite() && !v.is_sign_negative() {
+        return Ok(());
+    }
+    Err(color_eyre::eyre::eyre!(
+        "Invalid glycemic load for '{food}': {v}. In nutrition-db.md it is \
+         taken from `gl_per_100g` / `gl_per_100ml`, or computed as `gi` × \
+         carbs when neither is set, and must be zero or a positive finite \
+         number."
+    ))
+    .suggestion(format!(
+        "Check `gl_per_100g`, `gl_per_100ml`, `gi` and the carbs value for \
+         '{food}' in nutrition-db.md — a finite pair can still multiply to \
+         infinity."
     ))
 }
 
@@ -1450,29 +1496,6 @@ mod tests {
     type FlagCase = (&'static str, fn(&mut NutrientArgs));
 
     #[test]
-    fn the_glycemic_db_values_are_screened_too() {
-        // The flag screen reached all nine while the db screen covered six,
-        // and the db side is where the argument is stronger: one bad key is
-        // read on every logging of that food. Both GL columns are screened,
-        // including the one this food's panel does not use — it is the file
-        // that needs fixing, not this invocation.
-        let cases: [DbCase; 4] = [
-            ("gi", |f| f.gi = Some(-50.0)),
-            ("ii", |f| f.ii = Some(f64::NAN)),
-            ("gl_per_100g", |f| f.gl_per_100g = Some(-2.0)),
-            ("gl_per_100ml", |f| f.gl_per_100ml = Some(f64::INFINITY)),
-        ];
-        for (field, mutate) in cases {
-            let mut food = lookup_per_100g();
-            mutate(&mut food);
-            let err = render_lookup(&food, Some(parse_amount("500g").unwrap())).unwrap_err();
-            let msg = err.to_string();
-            assert!(msg.contains(field), "{field}: {msg}");
-            assert!(msg.contains("nutrition-db.md"), "{field}: {msg}");
-        }
-    }
-
-    #[test]
     fn every_rendered_entry_nutrient_reaches_the_db_screen() {
         // The flag path got a compile-time exhaustiveness pin; the db path
         // is the same shape of gap and the argument for closing it is the
@@ -1480,7 +1503,7 @@ mod tests {
         // a durable note on *every* logging of that food rather than once.
         // Each case corrupts one panel key and expects `render_lookup` to
         // name it.
-        let cases: [DbCase; 10] = [
+        let cases: [DbCase; 12] = [
             ("kcal", |f| f.per_100g.as_mut().unwrap().kcal = Some(-1.0)),
             ("protein", |f| {
                 f.per_100g.as_mut().unwrap().protein = Some(f64::NAN)
@@ -1495,6 +1518,19 @@ mod tests {
             ("ii", |f| f.ii = Some(f64::NAN)),
             ("gl_per_100g", |f| f.gl_per_100g = Some(-2.0)),
             ("gl_per_100ml", |f| f.gl_per_100ml = Some(f64::INFINITY)),
+            // Not a nutrient, but it reaches the note the same way: as the
+            // amount segment and as the factor `total_gl` is scaled by, so
+            // a negative one writes `(-462g)` and `GL ~-46.2`.
+            ("weight_g", |f| {
+                *f = lookup_total_panel();
+                f.total.as_mut().unwrap().weight_g = Some(-462.0)
+            }),
+            // The resolved figure, which the source columns cannot catch:
+            // both are finite here and their product is not.
+            ("gl", |f| {
+                f.gl_per_100g = Some(f64::MAX);
+                f.gl_per_100ml = None;
+            }),
         ];
         for (field, mutate) in cases {
             let mut food = lookup_per_100g();
@@ -1522,17 +1558,21 @@ mod tests {
             salt,
             gi,
             ii,
-            // Screened at its two source columns instead — see
-            // `render_lookup` — which is why the table is two longer than
-            // this list rather than one.
-            gl: _,
+            // Screened on the entry *as well as* at its two source columns:
+            // the columns give the actionable error, the resolved figure
+            // catches an overflow of a finite column. See `render_lookup`.
+            gl,
         } = render_lookup(&lookup_per_100g(), Some(parse_amount("500g").unwrap())).unwrap();
-        let screened_on_the_entry: [Option<f64>; 8] =
-            [kcal, protein, carbs, fat, fiber, salt, gi, ii];
+        let screened_on_the_entry: [Option<f64>; 9] =
+            [kcal, protein, carbs, fat, fiber, salt, gi, ii, gl];
+        // The three extras are the values screened at their source rather
+        // than on the entry: both GL columns, whose error has to name the
+        // key a user can actually edit, and `weight_g`, which is not a
+        // nutrient at all but reaches the note as the amount segment.
         assert_eq!(
             cases.len(),
-            screened_on_the_entry.len() + 2,
-            "every RenderedEntry nutrient needs a case, plus the two GL columns"
+            screened_on_the_entry.len() + 3,
+            "every RenderedEntry nutrient needs a case, plus the two GL columns and weight_g"
         );
     }
 
