@@ -295,22 +295,13 @@ fn detect_config_warnings(goals: &Goals, config: &Config) -> Vec<String> {
     for id in shadowed {
         warnings.push(format!(
             "`[metrics.{id}]` duplicates the built-in {id} total derived from your food \
-             entries — both rows are shown, but the goal is checked once. The \
-             food-derived row checks it on days its total settles the question; \
-             your logged row checks it on the days it does not — no food entries, none \
-             carrying {id}, or a partial total whose lower bound cannot prove the \
-             verdict either way. What is withheld from your row there is reassurance \
-             that lower bound could not support, never a warning. Note that the \
-             food-derived row can still print a shortfall on a day it settles \
-             nothing: `(27 below min)` beside `8.4+` says the entries measured so \
-             far fall short, not that the day does. So a red figure there above a \
-             green check on your row is one goal ruled once, by the row that can — \
-             not the same goal checked twice. When the two \
-             figures disagree about the goal, the reassuring check is withheld and the \
-             row says so. `--json` reports the food-derived total at `metrics.{id}`, \
-             with your logged value alongside it at `metrics.{id}.logged_value` on the \
-             days you log one, and the verdicts at `verdict` / `logged_verdict`. \
-             Renaming the metric would orphan the `{id}:` values already in your notes"
+             entries. Both rows are shown and the goal is ruled once, by whichever \
+             row can settle it — so a shortfall on one above a check on the other \
+             is a single ruling, not the same goal checked twice. `--json` keeps \
+             the food-derived total at `metrics.{id}` and your figure at \
+             `metrics.{id}.logged_value`. Renaming the metric would orphan the \
+             `{id}:` values already in your notes. `vitalog readme` has the full \
+             rule"
         ));
     }
 
@@ -569,10 +560,9 @@ pub fn render_text(summary: &DaySummary, goals: &Goals, color: bool) -> String {
 /// `lower_bound_proves`, which is the *evidence* test and one step
 /// stronger: gating display on it would drop
 /// `Calories: 1500 / 1900–2200 kcal  (400 below min)` from any day with an
-/// unparseable line, which is exactly the suppressed shortfall round 4
-/// shipped and round 5 reverted. What stops it being done here is that it
-/// is not
-/// this feature's behavior: this function and `skipped_lines` both predate
+/// unparseable line — suppressing a shortfall the user can act on because
+/// the total might be even lower, which is backwards. What stops it being
+/// done here is that it is not this function and `skipped_lines` both predate
 /// fiber and salt, and applying the rule would change Calories, Protein,
 /// Carbs and Fat on every day with a dropped line. That belongs in a change
 /// where it is the subject rather than a side effect.
@@ -716,7 +706,7 @@ fn nutrient_row_annotates(total: &NutrientTotal, food: &FoodTotals, t: &Threshol
 /// logged figure is the only real number there is. Nothing here may take
 /// the goal check away from it.
 fn nutrient_row_is_measured(total: &NutrientTotal, food: &FoodTotals) -> bool {
-    food.entry_count > total.unknown
+    total.is_measured(food.entry_count)
 }
 
 /// Whether an open lower bound *proves* the verdict `annotate_value` picks
@@ -1126,10 +1116,11 @@ fn reconciliation_note(logged: f64, measured: f64, measured_is_lower_bound: bool
 /// invariant the sibling tests pin by name is that the goal is **decided**
 /// once, not that only one row may carry a number; deciding it here is
 /// something the food-derived row cannot do. The two neighboring shapes are
-/// both regressions this file has already shipped once: suppressing the
-/// food row's shortfall was round 4, and letting it stand the logged row
-/// down was round 5. Printing both is what is left, and matrix property 8
-/// requires it.
+/// both wrong in ways that are easy to reach for: suppressing the food
+/// row's shortfall hides a signal the user can act on, and letting that
+/// shortfall stand the logged row down lets an unproven verdict silence a
+/// proven one. Printing both is what is left, and the coverage sweep's
+/// one-verdict-per-goal property requires it.
 fn nutrient_verdicts(id: &str, summary: &DaySummary, goals: &Goals) -> NutrientVerdicts {
     let (Some(total), Some(t)) = (
         builtin_nutrient_total(id, &summary.food),
@@ -2936,10 +2927,10 @@ mod tests {
         //   1. no reassurance from an incomplete food total — while the
         //      food-derived row has measured something but cannot see the
         //      whole day, no row on the screen may print `✓ under maximum`
-        //      or `✓ within range` (round 2's defect, round 3's inversion);
+        //      or `✓ within range`;
         //   2. no warning goes missing — when the food-derived row prints
         //      no verdict at all, a manual figure that breaks the goal must
-        //      still say so (round 4's defect);
+        //      still say so;
         //   5. the reconciliation note fires on exactly the cells where two
         //      verdicts exist and disagree, and nowhere else — not on a
         //      near-miss like 29 against 30, which is what keying on the
@@ -2955,11 +2946,11 @@ mod tests {
         //
         // The food-derived sum is an axis of its own rather than a constant
         // baked into each coverage shape. Holding it at 30 inside a 25–45
-        // band is what let round 5's defect through 60 green cells: with the
-        // food side never a `Warning`, half the verdict pairs simply never
-        // occurred, and the sweep covered well under the space it appeared
-        // to. Below min, inside the band, and above max are all reachable
-        // now.
+        // band leaves the food side never a `Warning`, so half the verdict
+        // pairs simply never occur and the sweep covers well under the
+        // space it appears to — a green grid proving nothing about the
+        // cells it cannot reach. Below min, inside the band, and above max
+        // are all reachable now.
         let shapes: [(&str, usize, usize, usize); 5] = [
             // (name, unknown, entry_count, skipped_lines)
             ("no food entries", 0, 0, 0),
@@ -2976,8 +2967,9 @@ mod tests {
         let reassuring_verdicts = ["under maximum", "within range"];
         let warnings = ["below min", "above max"];
         // Both branches have to be reached, or the sweep proves nothing
-        // about either. The food side's own verdicts are counted too: that
-        // is the coverage round 5 silently lost.
+        // about either. The food side's own verdicts are counted too,
+        // because a sweep that never produces one is the failure mode this
+        // grid exists to rule out.
         let mut notes = 0;
         let mut silent = 0;
         let mut food_warned = 0;
@@ -3210,9 +3202,10 @@ mod tests {
             }
         }
         assert!(notes > 0 && silent > 0, "sweep hit only one branch");
-        // The axis round 5 was missing: with the food-derived sum pinned
-        // inside the goal band, `food_warned` is zero and half the verdict
-        // pairs are unreachable.
+        // Guards the axis itself: with the food-derived sum pinned inside
+        // the goal band, `food_warned` is zero and half the verdict pairs
+        // are unreachable, so the grid would pass while testing half of
+        // what it claims.
         assert!(
             food_warned > 0 && food_reassured > 0 && unproven > 0,
             "sweep never reached one of the food-side verdicts \

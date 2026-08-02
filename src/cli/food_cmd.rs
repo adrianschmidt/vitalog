@@ -362,54 +362,31 @@ fn format_amount(value: f64, unit: &str) -> String {
 }
 
 fn format_nutrient_segment(entry: &RenderedEntry) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(kcal) = entry.kcal {
-        parts.push(format!("{} kcal", kcal.round() as i64));
-    }
-    if let Some(p) = entry.protein {
-        parts.push(format!("{p:.1}g protein"));
-    }
-    if let Some(c) = entry.carbs {
-        parts.push(format!("{c:.1}g carbs"));
-    }
-    if let Some(f) = entry.fat {
-        parts.push(format!("{f:.1}g fat"));
-    }
-    if let Some(f) = entry.fiber {
-        // Fiber stays at one decimal where salt takes two (see
-        // `format_salt_grams`), and so keeps that function's failure mode
-        // in miniature: a scaled entry under 0.05 g — 0.5 g/100 g at a 5 g
-        // amount — is written `0.0g fiber` and read back as a measured
-        // zero. The split is relative error against each nutrient's goal:
-        // 0.05 g is 0.14% of a 35 g fiber target but 0.83% of a 6 g salt
-        // cap, and fiber entries that small are not decision-relevant.
-        // Two decimals here would put a second digit on every scaled fiber
-        // token (`3.76g fiber`) to buy precision nothing reads.
-        parts.push(format!("{f:.1}g fiber"));
-    }
-    if let Some(s) = entry.salt {
-        parts.push(format!("{}g salt", format_salt_grams(s)));
-    }
-    parts.join(", ")
-}
-
-/// Salt keeps two decimals per entry, because the markdown line is the only
-/// storage the daily total is re-derived from and salt is the one nutrient
-/// whose interesting range (0.4–8 g against a 6 g cap) sits inside the
-/// one-decimal band. At `{:.1}` a 0.02 g entry is written as `0.0g salt`
-/// and read back as a *known* zero, and the per-entry rounding accumulates
-/// over 10–15 entries. A single trailing zero is trimmed so the common
-/// case still reads `1.2g salt` rather than `1.20g salt`; the parser
-/// accepts either. The *total* is still displayed at one decimal.
-///
-/// Fiber deliberately stays at `{:.1}`; the reasoning for the split sits on
-/// that decision, in `format_nutrient_segment`.
-fn format_salt_grams(v: f64) -> String {
-    let s = format!("{v:.2}");
-    match s.strip_suffix('0') {
-        Some(trimmed) => trimmed.to_string(),
-        None => s,
-    }
+    // The one place that maps `RenderedEntry`'s fields onto the shared
+    // table's order. Everything else about how a nutrient is written — its
+    // token, its precision, its position — lives in `NUTRIENTS`, which
+    // `machine_nutrients` reads back through, so the writer and the reader
+    // cannot disagree.
+    //
+    // Fiber inherits `render_grams`' one decimal rather than salt's two, and
+    // with it that precision's failure mode in miniature: a scaled entry
+    // under 0.05 g — 0.5 g/100 g at a 5 g amount — is written `0.0g fiber`
+    // and read back as a measured zero. See `render_salt_grams` for why the
+    // extra digit is bought for salt and not here.
+    let values = [
+        entry.kcal,
+        entry.protein,
+        entry.carbs,
+        entry.fat,
+        entry.fiber,
+        entry.salt,
+    ];
+    values
+        .iter()
+        .zip(crate::food_sum::NUTRIENTS.iter())
+        .filter_map(|(value, spec)| value.map(|v| format!("{}{}", (spec.render)(v), spec.token)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn format_glycemic_segment(entry: &RenderedEntry) -> String {
@@ -579,7 +556,7 @@ fn format_nutrient_total(
     if !total.is_lower_bound(skipped_lines) {
         return format!("{:.1}g {label}", total.sum);
     }
-    if total.unknown > 0 && total.unknown >= entry_count {
+    if total.unknown > 0 && !total.is_measured(entry_count) {
         let noun = if total.unknown == 1 {
             "entry"
         } else {
@@ -1061,15 +1038,6 @@ mod tests {
         let totals = crate::food_sum::sum_food_section(&format!("## Food\n{line}\n"));
         assert!((totals.salt.sum - 0.02).abs() < 1e-9);
         assert_eq!(totals.salt.unknown, 0);
-    }
-
-    #[test]
-    fn salt_trims_a_single_trailing_zero() {
-        assert_eq!(format_salt_grams(4.5), "4.5");
-        assert_eq!(format_salt_grams(1.0), "1.0");
-        assert_eq!(format_salt_grams(0.0), "0.0");
-        assert_eq!(format_salt_grams(0.02), "0.02");
-        assert_eq!(format_salt_grams(2.25), "2.25");
     }
 
     #[test]
