@@ -278,13 +278,17 @@ The reliable route is still to log the value rather than write it: `--fiber`
 `nutrition-db.md` and log the entry again.
 
 A food line vitalog cannot parse is missing from every number on that
-line, so it is called out after them — and it makes fiber and salt lower
-bounds as well, even where every entry that *did* parse supplied a value
-(hence the `+` on salt here, which has no unknown entries of its own):
+line, so it is called out after them, named by its timestamp — and it makes
+fiber and salt lower bounds as well, even where every entry that *did* parse
+supplied a value (hence the `+` on salt here, which has no unknown entries of
+its own):
 
 ```
-Today so far: 1340 kcal, 95g protein, 50g carbs, 60g fat, 8.4g+ fiber (9 unknown), 5.6g+ salt — 1 food line couldn't be parsed
+Today so far: 1340 kcal, 95g protein, 50g carbs, 60g fat, 8.4g+ fiber (9 unknown), 5.6g+ salt — 1 food line couldn't be parsed (08:00)
 ```
+
+The same sentence is the `--json` `warnings` entry, so a consumer that
+matched it exactly should match on the prefix instead.
 
 `--fiber` and `--salt` also work in lookup mode, where they override
 whatever the `nutrition-db.md` panel produced. That is how you fill the gap
