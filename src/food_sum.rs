@@ -39,6 +39,20 @@ impl NutrientTotal {
         !self.is_complete() || skipped_lines > 0
     }
 
+    /// Whether at least one of the day's entries supplied this nutrient.
+    ///
+    /// Kept here for the same reason as `is_lower_bound`: the running total
+    /// and the dashboard both need it, and two independent spellings of the
+    /// same predicate is how they drift into disagreeing about whether a
+    /// zero means "measured none" or "measured nothing".
+    ///
+    /// Note this is not `!is_complete()` — a day with no entries at all has
+    /// nothing unknown *and* nothing measured, so the two questions have
+    /// different answers exactly where it matters most.
+    pub fn is_measured(&self, entry_count: usize) -> bool {
+        entry_count > self.unknown
+    }
+
     fn add(&mut self, value: Option<f64>) {
         match value {
             Some(v) => self.sum += v,
@@ -174,26 +188,22 @@ fn parse_food_line(line: &str) -> Option<ParsedLine> {
         // unknown is the truthful answer. That asymmetry is the point:
         // macros behave exactly as they always have, and only the two new
         // nutrients are held to the stricter standard.
-        Some(n) => Some(ParsedLine {
-            kcal: n
-                .kcal
-                .or_else(|| extract_number_before(line, " kcal"))
-                .unwrap_or(0.0),
-            protein: n
-                .protein
-                .or_else(|| extract_number_before(line, "g protein"))
-                .unwrap_or(0.0),
-            carbs: n
-                .carbs
-                .or_else(|| extract_number_before(line, "g carbs"))
-                .unwrap_or(0.0),
-            fat: n
-                .fat
-                .or_else(|| extract_number_before(line, "g fat"))
-                .unwrap_or(0.0),
-            fiber: n.fiber,
-            salt: n.salt,
-        }),
+        Some(n) => {
+            let macro_or_whole_line = |which: Nutrient| {
+                let token = NUTRIENTS[which as usize].token;
+                n[which as usize]
+                    .or_else(|| extract_number_before(line, token))
+                    .unwrap_or(0.0)
+            };
+            Some(ParsedLine {
+                kcal: macro_or_whole_line(Nutrient::Kcal),
+                protein: macro_or_whole_line(Nutrient::Protein),
+                carbs: macro_or_whole_line(Nutrient::Carbs),
+                fat: macro_or_whole_line(Nutrient::Fat),
+                fiber: n[Nutrient::Fiber as usize],
+                salt: n[Nutrient::Salt as usize],
+            })
+        }
         // No nutrient group at all — a hand-written line such as
         // `- **09:00** Banan 90 kcal`, or one whose closing paren was
         // edited away. Read the four macros off the whole line, which is
@@ -222,14 +232,111 @@ fn parse_food_line(line: &str) -> Option<ParsedLine> {
 /// The six tokens `format_nutrient_segment` writes, in the order it writes
 /// them. The anchor search below reads this list, so a nutrient added to
 /// the formatter is added here once.
-const NUTRIENT_TOKENS: [&str; 6] = [
-    " kcal",
-    "g protein",
-    "g carbs",
-    "g fat",
-    "g fiber",
-    "g salt",
+/// One nutrient, as the formatter writes it and the reader matches it.
+///
+/// The writer and the reader are inverses, and this table is the single
+/// place that says so. `format_nutrient_segment` emits `render(value)`
+/// followed by `token`; `machine_nutrients` strips `token` and validates
+/// the digits against the same decimal range. Nothing else knows the token
+/// strings, the precision, or the order, so the two cannot drift apart.
+///
+/// They previously could, in four independent places: the formatter's
+/// `format!` calls, a separate token list here, the reader's per-token
+/// decimal counts, and an ordering expressed once as push order and once as
+/// integer ranks. Nothing failed to compile when those disagreed and the
+/// failure was silent — changing `format_salt_grams` to strip both trailing
+/// zeros would have left `1.25` parsing while every whole-gram salt entry
+/// read as unknown, switching the feature off for exactly the entries that
+/// look most ordinary.
+///
+/// The order of this array *is* the order the formatter emits and the
+/// reader requires.
+pub(crate) struct NutrientSpec {
+    pub token: &'static str,
+    /// Fewest and most digits `render` can put after the point. Only salt
+    /// spans a range: `format_salt_grams` strips a single trailing zero, so
+    /// `1.25` keeps both digits while `2.00` becomes `2.0`.
+    pub min_decimals: usize,
+    pub max_decimals: usize,
+    pub render: fn(f64) -> String,
+}
+
+/// Index into [`NUTRIENTS`], so the table and the values it describes cannot
+/// be addressed inconsistently. `every_shape_the_formatter_writes_reads_back_unchanged`
+/// fails if a variant and its spec ever fall out of step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nutrient {
+    Kcal = 0,
+    Protein = 1,
+    Carbs = 2,
+    Fat = 3,
+    Fiber = 4,
+    Salt = 5,
+}
+
+pub(crate) const NUTRIENTS: [NutrientSpec; 6] = [
+    NutrientSpec {
+        token: " kcal",
+        min_decimals: 0,
+        max_decimals: 0,
+        render: render_kcal,
+    },
+    NutrientSpec {
+        token: "g protein",
+        min_decimals: 1,
+        max_decimals: 1,
+        render: render_grams,
+    },
+    NutrientSpec {
+        token: "g carbs",
+        min_decimals: 1,
+        max_decimals: 1,
+        render: render_grams,
+    },
+    NutrientSpec {
+        token: "g fat",
+        min_decimals: 1,
+        max_decimals: 1,
+        render: render_grams,
+    },
+    NutrientSpec {
+        token: "g fiber",
+        min_decimals: 1,
+        max_decimals: 1,
+        render: render_grams,
+    },
+    NutrientSpec {
+        token: "g salt",
+        min_decimals: 1,
+        max_decimals: 2,
+        render: render_salt_grams,
+    },
 ];
+
+/// kcal is written whole — the underlying figure is rounded on the way in.
+fn render_kcal(v: f64) -> String {
+    format!("{}", v.round() as i64)
+}
+
+/// One decimal, which is the resolution the macros and fiber are stored at.
+fn render_grams(v: f64) -> String {
+    format!("{v:.1}")
+}
+
+/// Salt keeps two decimals where fiber takes one, and drops a single
+/// trailing zero so ordinary values still read as `2.0g salt`.
+///
+/// The extra digit is bought by relative error against each nutrient's goal:
+/// 0.005 g is 0.014% of a 35 g fiber target but 0.083% of a 6 g salt cap, and
+/// a salt figure is compared against a cap that a rounding error can push a
+/// day across. Fiber entries that small are not decision-relevant.
+fn render_salt_grams(v: f64) -> String {
+    let s = format!("{v:.2}");
+    match s.strip_suffix('0') {
+        Some(trimmed) => trimmed.to_string(),
+        None => s,
+    }
+}
 
 /// The nutrient values in `line`, if it carries a group that
 /// `format_nutrient_segment` could have written.
@@ -242,8 +349,8 @@ const NUTRIENT_TOKENS: [&str; 6] = [
 /// Deciding whether what it finds is a *measurement* is the half that
 /// matters, and `machine_nutrients` answers it by exact match against the
 /// formatter's own grammar rather than by judging the text. See there.
-fn machine_segment(line: &str) -> Option<MachineNutrients> {
-    let anchor = NUTRIENT_TOKENS.iter().filter_map(|t| line.rfind(t)).max()?;
+fn machine_segment(line: &str) -> Option<[Option<f64>; 6]> {
+    let anchor = NUTRIENTS.iter().filter_map(|n| line.rfind(n.token)).max()?;
     // The `(` the token is inside: walking left, each `)` claims the `(`
     // that matches it, so the first unclaimed `(` is the innermost opener
     // still holding the token.
@@ -278,18 +385,6 @@ fn machine_segment(line: &str) -> Option<MachineNutrients> {
     machine_nutrients(&line[open + 1..close?])
 }
 
-/// The six values `format_nutrient_segment` can write, each present only if
-/// the formatter wrote it.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-struct MachineNutrients {
-    kcal: Option<f64>,
-    protein: Option<f64>,
-    carbs: Option<f64>,
-    fat: Option<f64>,
-    fiber: Option<f64>,
-    salt: Option<f64>,
-}
-
 /// Parse `s` as a segment `format_nutrient_segment` could have written, or
 /// return `None`.
 ///
@@ -309,42 +404,24 @@ struct MachineNutrients {
 /// the whole line in `parse_food_line`'s other arm, exactly as they did
 /// before any of this, so nothing a legacy line used to count stops
 /// counting.
-fn machine_nutrients(s: &str) -> Option<MachineNutrients> {
-    let mut n = MachineNutrients::default();
-    let mut rank = 0u8;
+fn machine_nutrients(s: &str) -> Option<[Option<f64>; 6]> {
+    let mut values: [Option<f64>; 6] = [None; 6];
+    let mut next = 0usize;
     for item in s.split(", ") {
-        // `{}` for kcal (`round() as i64`), `{:.1}` for the macros and
-        // fiber, and `{:.2}` less a single stripped `0` for salt.
-        let (value, this_rank) = if let Some(d) = item.strip_suffix(" kcal") {
-            (decimals(d, 0, 0)?, 1)
-        } else if let Some(d) = item.strip_suffix("g protein") {
-            (decimals(d, 1, 1)?, 2)
-        } else if let Some(d) = item.strip_suffix("g carbs") {
-            (decimals(d, 1, 1)?, 3)
-        } else if let Some(d) = item.strip_suffix("g fat") {
-            (decimals(d, 1, 1)?, 4)
-        } else if let Some(d) = item.strip_suffix("g fiber") {
-            (decimals(d, 1, 1)?, 5)
-        } else if let Some(d) = item.strip_suffix("g salt") {
-            (decimals(d, 1, 2)?, 6)
-        } else {
-            return None;
-        };
-        // Strictly increasing: the formatter's order, no repeats.
-        if this_rank <= rank {
-            return None;
-        }
-        rank = this_rank;
-        match this_rank {
-            1 => n.kcal = Some(value),
-            2 => n.protein = Some(value),
-            3 => n.carbs = Some(value),
-            4 => n.fat = Some(value),
-            5 => n.fiber = Some(value),
-            _ => n.salt = Some(value),
-        }
+        // Only tokens at or after `next` are eligible, which enforces the
+        // formatter's order and rejects a repeat in one test.
+        let (i, spec) = NUTRIENTS
+            .iter()
+            .enumerate()
+            .skip(next)
+            .find(|(_, spec)| item.ends_with(spec.token))?;
+        let digits = item.strip_suffix(spec.token)?;
+        values[i] = Some(decimals(digits, spec.min_decimals, spec.max_decimals)?);
+        next = i + 1;
     }
-    (rank > 0).then_some(n)
+    // `next` only advances when an item parsed, so this rejects the empty
+    // segment that `()` would otherwise produce.
+    (next > 0).then_some(values)
 }
 
 /// Parse `s` as a non-negative decimal with between `min` and `max` digits
@@ -1185,5 +1262,14 @@ mod tests {
             }
         }
         assert_eq!(checked, 3 * 3 * 6 * 4, "sweep did not cover the lattice");
+    }
+
+    #[test]
+    fn salt_trims_a_single_trailing_zero() {
+        assert_eq!(render_salt_grams(4.5), "4.5");
+        assert_eq!(render_salt_grams(1.0), "1.0");
+        assert_eq!(render_salt_grams(0.0), "0.0");
+        assert_eq!(render_salt_grams(0.02), "0.02");
+        assert_eq!(render_salt_grams(2.25), "2.25");
     }
 }
