@@ -1,3 +1,16 @@
+# [1.6.0](https://github.com/adrianschmidt/vitalog/compare/v1.5.0...v1.6.0) (2026-08-02)
+
+
+### Bug Fixes
+
+* **food:** ask the formatter what it writes instead of counting decimals ([4d0e17d](https://github.com/adrianschmidt/vitalog/commit/4d0e17dc1a03d2e1282afa5b236cfe8f3dade696))
+* **food:** count entries the formatter wrote but the reader refused ([d6b8f11](https://github.com/adrianschmidt/vitalog/commit/d6b8f1112bba1462c359289b74e62897f2327464))
+
+
+### Features
+
+* **food:** report cumulative salt and fiber intake ([439ee80](https://github.com/adrianschmidt/vitalog/commit/439ee80cd2da5ad5b90095bd3be2454b1500d29d))
+
 # [1.5.0](https://github.com/adrianschmidt/vitalog/compare/v1.4.0...v1.5.0) (2026-07-12)
 
 
