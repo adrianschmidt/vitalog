@@ -20,7 +20,7 @@ impl NutrientTotal {
     /// Private on purpose. It is the weaker half of the exactness test —
     /// vacuously true on a day with no entries, and blind to a food line
     /// the parser dropped — and renderers reaching for it instead of
-    /// `is_lower_bound` is what two earlier rounds of review found. Off the
+    /// `is_lower_bound` is what earlier attempts at this got wrong. Off the
     /// public surface, the next surface added cannot make that mistake.
     fn is_complete(&self) -> bool {
         self.unknown == 0
@@ -237,9 +237,11 @@ fn parse_food_line(line: &str) -> Option<ParsedLine> {
 ///
 /// The writer and the reader are inverses, and this table is the single
 /// place that says so. `format_nutrient_segment` emits `render(value)`
-/// followed by `token`; `machine_nutrients` strips `token` and validates
-/// the digits against the same decimal range. Nothing else knows the token
-/// strings, the precision, or the order, so the two cannot drift apart.
+/// followed by `token`; `machine_nutrients` strips `token` and asks `render`
+/// itself whether those digits are what it would have written. Precision is
+/// therefore stated once, in `render`, rather than restated as a range the
+/// reader checks — nothing else knows the token strings, the precision, or
+/// the order, so the two cannot drift apart.
 ///
 /// They previously could, in four independent places: the formatter's
 /// `format!` calls, a separate token list here, the reader's per-token
@@ -419,20 +421,31 @@ fn machine_nutrients(s: &str) -> Option<[Option<f64>; NUTRIENTS.len()]> {
         values[i] = Some(machine_digits(spec, digits)?);
         next = i + 1;
     }
-    // `next` only advances when an item parsed, so this rejects the empty
-    // segment that `()` would otherwise produce.
+    // `next` only advances when an item parsed, so this rejects a segment
+    // that matched no token at all. It is not what stops `()` — an empty
+    // segment yields one empty item, which matches nothing, so the `?` on
+    // `find` has already returned.
     (next > 0).then_some(values)
 }
 
 /// Parse `digits` as exactly the string `spec.render` produces for the value
 /// they denote, or return `None`.
 ///
-/// Two tests, and both are load-bearing. The character test rejects what
-/// `format!` cannot emit at all — a sign, whitespace, a `~`, an exponent.
+/// Two tests, and both are load-bearing. The character test states one rule —
+/// the digits must be digits — and rejects everything `format!` cannot emit:
+/// a sign, whitespace, a `~`, an exponent, and the spellings of the two
+/// values that would otherwise poison a total.
+///
 /// It cannot be dropped in favour of the re-render test alone, because
-/// `render` is not injective over strings it never writes: `render_grams`
-/// turns `-5.0` back into `"-5.0"`, so a hand-written negative would compare
-/// equal to itself and be accepted as a measurement.
+/// `render` is not injective over strings it never writes. `format!("{:.1}",
+/// f64::NAN)` is `"NaN"` and `"NaN".parse()` succeeds, so `NaNg fiber`
+/// re-renders equal to itself; the same holds for `infg salt`. A NaN that
+/// reaches a total is worse than a wrong number, because every comparison
+/// against it is false: `annotate_value` then finds the day neither below
+/// its minimum nor above its maximum and prints a green `✓ over minimum`
+/// for a nutrient nothing measured. A negative is refused by the same rule,
+/// but nobody logs a negative quantity of food — that is a side effect, not
+/// the reason this test is here.
 ///
 /// The re-render test then requires the digits to be *precisely* what the
 /// formatter writes for that value, which is what makes "the formatter wrote
@@ -1304,13 +1317,19 @@ mod tests {
         // so a hand-written token was read as a measurement. Asking `render`
         // directly is what makes "the formatter wrote this" literally true.
         //
-        // The character test is still needed alongside it: `render_grams`
-        // turns -5.0 back into "-5.0", so a re-render comparison on its own
-        // would accept a hand-written negative as equal to itself.
+        // The character test is still needed alongside it, and `NaN` is why:
+        // it renders as "NaN" and parses back, so it survives a re-render
+        // comparison unchanged. A NaN in a total makes every goal comparison
+        // false, so the day prints a green check for a nutrient nothing
+        // measured — a wrong answer that looks like a right one. `inf` is
+        // the same shape. A negative falls out of the same rule and is
+        // included below for completeness, not as the motivating case.
         for (label, seg) in [
             ("a second decimal salt never keeps", "300 kcal, 2.00g salt"),
             ("a leading zero on kcal", "0300 kcal, 2.0g salt"),
             ("a trailing point on kcal", "300. kcal, 2.0g salt"),
+            ("a NaN, which re-renders as itself", "300 kcal, NaNg fiber"),
+            ("an infinity, likewise", "300 kcal, infg salt"),
             ("a sign", "300 kcal, -5.0g salt"),
             (
                 "a whole-gram salt written to two places",

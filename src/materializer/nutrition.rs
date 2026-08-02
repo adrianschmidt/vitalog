@@ -160,7 +160,8 @@ pub(crate) fn build_food_insert(entry: &ParsedEntry) -> Result<FoodInsert> {
         // the unknown counting exists to prevent.
         if !d.is_finite() || d <= 0.0 {
             return Err(eyre!(
-                "entry '{}' (line {}): density_g_per_ml must be > 0 (got {})",
+                "entry '{}' (line {}): density_g_per_ml must be a positive \
+                 finite number (got {})",
                 entry.name,
                 entry.line_number,
                 d

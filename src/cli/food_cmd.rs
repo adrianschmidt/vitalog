@@ -257,7 +257,8 @@ fn render_with_amount(food: &FoodLookup, amount: Amount) -> Result<RenderedEntry
             }
             (None, Some(_), _) => {
                 bail!(
-                    "{} is a liquid (per_100ml only) and has no density_g_per_ml. \
+                    "{} is a liquid (per_100ml only) with no usable \
+                     density_g_per_ml. \
                      Use ml: 'vitalog food {} {}ml'.",
                     food.name,
                     food.name,
@@ -279,7 +280,8 @@ fn render_with_amount(food: &FoodLookup, amount: Amount) -> Result<RenderedEntry
             }
             (None, Some(_), _) => {
                 bail!(
-                    "{} is a solid (per_100g only) and has no density_g_per_ml. \
+                    "{} is a solid (per_100g only) with no usable \
+                     density_g_per_ml. \
                      Use grams: 'vitalog food {} {}g'.",
                     food.name,
                     food.name,
@@ -1545,7 +1547,7 @@ mod tests {
         // a tenth nutrient grow the table above rather than reach the note
         // unscreened: the destructure stops compiling when a field is
         // added, the new binding is an unused-variable warning until it is
-        // listed, `[Option<f64>; 8]` stops compiling when it is, and this
+        // listed, `[Option<f64>; 9]` stops compiling when it is, and this
         // assertion then fails until the table covers it too.
         let RenderedEntry {
             display_name: _,
@@ -1939,6 +1941,48 @@ mod tests {
                 .join(format!("{}.md", config.effective_today()))
                 .exists(),
             "a rejected entry must not have been written"
+        );
+    }
+
+    #[test]
+    fn a_glycemic_load_that_overflows_is_caught_before_the_note() {
+        // `--gi` and `--carbs` are each screened and each finite, and their
+        // product is not. GL is the only figure computed *after*
+        // `render_lookup`'s screen has run — `render_custom` derives it from
+        // the flags, and `apply_lookup_overrides` recomputes it from an
+        // overridden `--gi` — so the screen in `execute` is the only thing
+        // standing between that product and `| GL ~inf` in a durable note.
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = config_in(dir.path());
+
+        let err = execute(
+            "Overflow pasta",
+            Some("500g"),
+            NutrientArgs {
+                kcal: Some(350.0),
+                protein: Some(7.0),
+                carbs: Some(f64::MAX),
+                fat: Some(25.0),
+                gi: Some(f64::MAX),
+                ..Default::default()
+            },
+            None,
+            Some("12:42"),
+            &config,
+            true,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("glycemic load"), "got: {msg}");
+        assert!(msg.contains("Overflow pasta"), "got: {msg}");
+
+        // …and nothing was written: the screen runs before the note is
+        // touched, which is the property that makes it worth having.
+        assert!(
+            !dir.path()
+                .join(format!("{}.md", config.effective_today()))
+                .exists(),
+            "a note was written despite the error"
         );
     }
 

@@ -258,7 +258,10 @@ decided from the text: `Lightly salted chips 0.1g salt per bag` and
 and `unknown` is the honest answer for a day on which nothing recorded the
 value. The four macros are unaffected — they still come off any line that
 names them, exactly as they always have, so nothing that used to count
-stops counting.
+stops counting — with one exception, which is a fix rather than a loss: a
+line whose calorie figure is a digit run long enough to overflow used to be
+counted as an infinite value, poisoning every total on the day. It is now
+reported as an unparseable line instead.
 
 Most ways of editing a line by hand will not make fiber or salt count.
 `- **09:00** Knäckebröd 90 kcal, 6.0g fiber` (no group at all),
