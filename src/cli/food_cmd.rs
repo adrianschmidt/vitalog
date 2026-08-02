@@ -176,14 +176,22 @@ pub fn render_lookup(food: &FoodLookup, amount: Option<Amount>) -> Result<Render
     validate_db_nutrient(entry.salt, "salt", &food.name)?;
     validate_db_nutrient(entry.gi, "gi", &food.name)?;
     validate_db_nutrient(entry.ii, "ii", &food.name)?;
-    // GL is screened at its source columns rather than at `entry.gl`,
-    // because the resolved figure has three possible origins — either
-    // `gl_per_100*` key, or `gi × carbs` when neither is set — and the
-    // error is only useful if it can name the key to fix. The derived route
-    // cannot smuggle a bad value past this: `gi` and `carbs` are both
-    // screened above it.
+    // `weight_g` is not a nutrient but reaches the note the same way: it
+    // becomes the amount segment and scales `total_gl`, so a negative one
+    // writes `(-462g)` and `GL ~-46.2` into a durable file.
+    if let Some(total) = food.total.as_ref() {
+        validate_db_nutrient(total.weight_g, "weight_g", &food.name)?;
+    }
+    // GL is screened at its source columns *as well as* at the resolved
+    // figure. The source check is the one whose error is actionable — the
+    // resolved value has three possible origins (either `gl_per_100*` key,
+    // or `gi × carbs` when neither is set), so only the key can name what
+    // to fix. The resolved check catches what the source check cannot: a
+    // finite column scaled by a finite amount can still overflow to
+    // infinity, and that product is what reaches the line.
     validate_db_nutrient(food.gl_per_100g, "gl_per_100g", &food.name)?;
     validate_db_nutrient(food.gl_per_100ml, "gl_per_100ml", &food.name)?;
+    validate_db_nutrient(entry.gl, "gl", &food.name)?;
     Ok(entry)
 }
 
