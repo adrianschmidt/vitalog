@@ -260,13 +260,22 @@ value. The four macros are unaffected — they still come off any line that
 names them, exactly as they always have, so nothing that used to count
 stops counting.
 
-Editing a line by hand will not make fiber or salt count. All of
-`- **09:00** Knäckebröd 90 kcal, 6.0g fiber`, `(90 kcal, ca 6.0g fiber)`,
-`(~90 kcal, ~6.0g fiber)`, a trailing `… (90 kcal) (6.0g fiber)`, and even
-`( 90 kcal, 6.0g fiber)` with one extra space read as unknown — and all of
-them keep the entry and its calories in the day's total. To record a value,
-log it: `--fiber` / `--salt` work in both custom and lookup mode, or add the
-key to `nutrition-db.md` and log the entry again.
+Most ways of editing a line by hand will not make fiber or salt count.
+`- **09:00** Knäckebröd 90 kcal, 6.0g fiber` (no group at all),
+`(90 kcal, ca 6.0g fiber)` (a prose-led item), `(~90 kcal, ~6.0g fiber)`
+(estimate markers) and `( 90 kcal, 6.0g fiber)` (one extra space) all read
+as unknown. Every one of them still keeps the entry and its calories in the
+day's total — a rejected group costs you the two nutrients, never the meal.
+
+The one hand edit that *does* count is appending the value as its own
+group: `- **09:00** Knäckebröd (90 kcal) (6.0g fiber)` records 6.0 g of
+fiber. That is not a special case — a lone `(6.0g fiber)` is exactly what
+vitalog writes for an entry that has fiber and nothing else, so the two are
+indistinguishable and no rule could separate them.
+
+The reliable route is still to log the value rather than write it: `--fiber`
+/ `--salt` work in both custom and lookup mode, or add the key to
+`nutrition-db.md` and log the entry again.
 
 A food line vitalog cannot parse is missing from every number on that
 line, so it is called out after them — and it makes fiber and salt lower

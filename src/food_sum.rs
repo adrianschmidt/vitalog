@@ -156,11 +156,41 @@ struct ParsedLine {
 
 fn parse_food_line(line: &str) -> Option<ParsedLine> {
     match machine_segment(line) {
+        // The formatter wrote this group, so the line is an entry — even
+        // when the group carries no kcal. `format_nutrient_segment` emits
+        // each token only when the entry has it, so a `salt:`-only food
+        // (bouillon, soy sauce, a seasoning) produces a perfectly valid
+        // `(2.28g salt)` group and nothing else. Requiring kcal here made
+        // vitalog write a line it then refused to read, reporting `0.0g+
+        // salt` for an entry whose salt it had just measured.
+        //
+        // The four macros fall back to the whole line when the group does
+        // not carry them, because a hand edit can leave them outside it:
+        // `(90 kcal) (6.0g fiber)` puts kcal in a sibling group, and
+        // reading only the anchored one dropped the entry entirely where
+        // every version before this counted it. Fiber and salt get no such
+        // fallback — unanchored, they would forge a *measurement* out of a
+        // food name (`Lightly salted chips 0.1g salt per bag`) where
+        // unknown is the truthful answer. That asymmetry is the point:
+        // macros behave exactly as they always have, and only the two new
+        // nutrients are held to the stricter standard.
         Some(n) => Some(ParsedLine {
-            kcal: n.kcal?,
-            protein: n.protein.unwrap_or(0.0),
-            carbs: n.carbs.unwrap_or(0.0),
-            fat: n.fat.unwrap_or(0.0),
+            kcal: n
+                .kcal
+                .or_else(|| extract_number_before(line, " kcal"))
+                .unwrap_or(0.0),
+            protein: n
+                .protein
+                .or_else(|| extract_number_before(line, "g protein"))
+                .unwrap_or(0.0),
+            carbs: n
+                .carbs
+                .or_else(|| extract_number_before(line, "g carbs"))
+                .unwrap_or(0.0),
+            fat: n
+                .fat
+                .or_else(|| extract_number_before(line, "g fat"))
+                .unwrap_or(0.0),
             fiber: n.fiber,
             salt: n.salt,
         }),
@@ -586,24 +616,33 @@ mod tests {
     fn a_name_mentioning_kcal_cannot_hijack_a_group_that_has_no_kcal() {
         // kcal is the *first* token the formatter writes but not a
         // guaranteed one: a `nutrition-db.md` entry with `salt:` and no
-        // `kcal:` makes vitalog itself write this line. Anchoring on
-        // ` kcal` alone walked out from the name, discarded the real
+        // `kcal:` makes vitalog itself write a kcal-less group. Anchoring
+        // on ` kcal` alone walked out from the name, discarded the real
         // 5.76 g and recorded the name's 1.9 g as a measurement — a green
         // `✓ under maximum` off free text, on the number issue #39 makes
         // clinically load-bearing.
+        //
+        // The real group wins and the name contributes nothing: 5.76 is
+        // read, 1.9 is not. kcal falls back to the whole line, which finds
+        // the name's `0 kcal` — a macro read exactly as every version
+        // before this one did it.
         let md = "## Food\n- **12:00** Bouillontärning (0 kcal, 1.9g salt per tärning) (12g) (5.76g salt)\n";
         let r = sum_food_section(md);
-        assert_eq!(r.salt.sum, 0.0, "salt: {:?}", r.salt);
+        assert!((r.salt.sum - 5.76).abs() < 1e-9, "salt: {:?}", r.salt);
         assert_eq!(r.salt.unknown, 0, "salt: {:?}", r.salt);
-        assert_eq!(r.entry_count, 0);
-        // The name is what the two shapes differ by, and it no longer
-        // changes the outcome: both are the kcal-less group that
-        // `parse_food_line` has always declined to read, counted and
-        // flagged rather than guessed at.
-        assert_eq!(r.skipped_lines, 1);
+        assert_eq!(r.entry_count, 1);
+        assert_eq!(r.skipped_lines, 0);
+
+        // The name is what the two shapes differ by, and it does not change
+        // which salt figure is read — only whether the whole-line kcal
+        // fallback finds anything, which is the pre-existing macro rule.
         let control =
             "## Food\n- **12:00** Bouillontärning (1.9g salt per tärning) (12g) (5.76g salt)\n";
-        assert_eq!(sum_food_section(control), r);
+        let c = sum_food_section(control);
+        assert!((c.salt.sum - 5.76).abs() < 1e-9, "salt: {:?}", c.salt);
+        assert_eq!(c.salt.unknown, 0);
+        assert_eq!(c.entry_count, 1);
+        assert_eq!(c.skipped_lines, 0);
     }
 
     #[test]
@@ -749,12 +788,29 @@ mod tests {
     }
 
     #[test]
-    fn food_name_cannot_forge_a_macro_token_either() {
-        // Same anchoring protects the four macros on lines that omit them.
+    fn a_macro_named_only_in_the_food_name_reads_as_it_always_has() {
+        // The anchoring deliberately does *not* protect the four macros.
+        // They are read off the whole line whenever the nutrient group
+        // does not carry them, which is what every version before this
+        // feature did, so no line that used to count stops counting and no
+        // macro total moves. `20.0g protein` in the name is therefore read
+        // — the same figure `main` reports for this line.
+        //
+        // Fiber and salt are the exception, and the reason the asymmetry
+        // exists: their token is legitimately absent most of the time, so
+        // an unanchored match would forge a measurement where unknown is
+        // the truthful answer. See `machine_nutrients`.
         let md = "## Food\n- **08:00** Bar 20.0g protein per serving (5 kcal)\n";
         let r = sum_food_section(md);
         assert_eq!(r.kcal, 5.0);
-        assert_eq!(r.protein, 0.0);
+        assert!((r.protein - 20.0).abs() < 1e-9, "protein: {}", r.protein);
+        assert_eq!(r.entry_count, 1);
+
+        // …but a salt figure in the name still contributes nothing.
+        let md = "## Food\n- **08:00** Chips 0.1g salt per bag (5 kcal)\n";
+        let r = sum_food_section(md);
+        assert_eq!(r.salt.sum, 0.0, "salt: {:?}", r.salt);
+        assert_eq!(r.salt.unknown, 1, "salt: {:?}", r.salt);
     }
 
     #[test]
@@ -881,9 +937,9 @@ mod tests {
         for (label, line, fiber, salt) in [
             (
                 "full panel, two-decimal salt",
-                "- **08:00** Sallad (500g) (350 kcal, 7.0g protein, 24.0g carbs, 10.0g fat, 5.0g fiber, 2.00g salt)",
+                "- **08:00** Sallad (500g) (350 kcal, 7.0g protein, 24.0g carbs, 10.0g fat, 5.0g fiber, 1.25g salt)",
                 Some(5.0),
-                Some(2.0),
+                Some(1.25),
             ),
             (
                 "one-decimal salt",
@@ -991,5 +1047,143 @@ mod tests {
             assert_eq!(r.fiber.sum, 0.0, "{label}");
             assert_eq!(r.salt.sum, 0.0, "{label}");
         }
+    }
+
+    #[test]
+    fn a_macro_in_a_sibling_group_still_counts() {
+        // A hand edit can put the nutrient the formatter wrote in one group
+        // and a macro in another: `(90 kcal) (6.0g fiber)`. The anchor lands
+        // on the fiber group, which is a valid formatter shape, so it is
+        // accepted — and reading macros only from the accepted group dropped
+        // the entry entirely, taking 90 kcal out of a day that every version
+        // before this counted. README documents this shape as one that keeps
+        // its calories, so this pins the promise as well as the behavior.
+        let md = "## Food\n- **09:00** Knäckebröd (90 kcal) (6.0g fiber)\n";
+        let r = sum_food_section(md);
+        assert_eq!(r.kcal, 90.0, "the sibling group's kcal must still count");
+        assert_eq!(r.entry_count, 1);
+        assert_eq!(r.skipped_lines, 0);
+        assert!((r.fiber.sum - 6.0).abs() < 1e-9, "fiber: {:?}", r.fiber);
+        assert_eq!(r.fiber.unknown, 0);
+    }
+
+    #[test]
+    fn a_kcal_less_entry_the_formatter_wrote_is_read_back() {
+        // `format_nutrient_segment` emits a token only when the entry has
+        // it, so a `nutrition-db.md` food with `salt:` and no `kcal:` —
+        // bouillon, soy sauce, a seasoning — produces a group with salt
+        // alone. Requiring kcal made vitalog write this line and then refuse
+        // to read it, reporting `0.0g+ salt` for salt it had just measured,
+        // and setting `skipped_lines` so every nutrient that day became a
+        // lower bound.
+        let entry = crate::cli::food_cmd::RenderedEntry {
+            display_name: "Bouillontärning".into(),
+            amount_segment: Some((12.0, "g")),
+            kcal: None,
+            protein: None,
+            carbs: None,
+            fat: None,
+            fiber: Some(0.1),
+            salt: Some(2.28),
+            gi: None,
+            gl: None,
+            ii: None,
+        };
+        let line = crate::cli::food_cmd::format_line(&entry, "14:52");
+        let r = sum_food_section(&format!("## Food\n{line}\n"));
+        assert_eq!(r.entry_count, 1, "line was: {line}");
+        assert_eq!(r.skipped_lines, 0, "line was: {line}");
+        assert!((r.salt.sum - 2.28).abs() < 1e-9, "salt: {:?}", r.salt);
+        assert_eq!(r.salt.unknown, 0);
+        assert!((r.fiber.sum - 0.1).abs() < 1e-9, "fiber: {:?}", r.fiber);
+        assert_eq!(r.kcal, 0.0, "no kcal was written, so none is read");
+    }
+
+    #[test]
+    fn every_shape_the_formatter_writes_reads_back_unchanged() {
+        // The load-bearing invariant, swept rather than sampled: whatever
+        // `format_line` writes, `sum_food_section` must read back. Both
+        // regressions this pins were shapes nobody had thought to write by
+        // hand — a kcal-less group, and a nutrient subset — so the sweep
+        // covers the option lattice instead of a few chosen lines.
+        //
+        // Salt is the interesting axis: `format_salt_grams` emits `{:.2}`
+        // less a single stripped trailing zero, so it produces one *or* two
+        // decimals and the reader has to accept both. 2.0 becomes "2.0";
+        // 1.25 stays "1.25"; 0.05 stays "0.05".
+        use crate::cli::food_cmd::{format_line, RenderedEntry};
+        let proteins = [None, Some(0.0), Some(7.0)];
+        let salts = [
+            None,
+            Some(0.0),
+            Some(2.0),
+            Some(1.25),
+            Some(0.05),
+            Some(10.0),
+        ];
+        let fibers = [None, Some(0.0), Some(6.0), Some(0.1)];
+        let mut checked = 0usize;
+        for kcal in [None, Some(0.0), Some(350.0)] {
+            for &protein in &proteins {
+                for &salt in &salts {
+                    for &fiber in &fibers {
+                        let e = RenderedEntry {
+                            display_name: "Testmat".into(),
+                            amount_segment: Some((500.0, "g")),
+                            kcal,
+                            protein,
+                            carbs: None,
+                            fat: None,
+                            fiber,
+                            salt,
+                            gi: None,
+                            gl: None,
+                            ii: None,
+                        };
+                        let line = format_line(&e, "08:00");
+                        let r = sum_food_section(&format!("## Food\n{line}\n"));
+                        checked += 1;
+
+                        // An entry with no nutrient at all writes no group,
+                        // so there is nothing to read and nothing to count.
+                        // `main` declines the same line for the same reason:
+                        // it carries no data, rather than data that was lost.
+                        if kcal.is_none() && protein.is_none() && fiber.is_none() && salt.is_none()
+                        {
+                            assert_eq!(r.entry_count, 0, "empty entry counted: {line}");
+                            assert_eq!(r.skipped_lines, 1, "empty entry: {line}");
+                            continue;
+                        }
+
+                        // Anything else the formatter wrote is an entry.
+                        assert_eq!(r.entry_count, 1, "not counted: {line}");
+                        assert_eq!(r.skipped_lines, 0, "skipped: {line}");
+                        assert_eq!(r.kcal, kcal.unwrap_or(0.0), "kcal: {line}");
+                        assert!(
+                            (r.protein - protein.unwrap_or(0.0)).abs() < 1e-9,
+                            "protein: {line}"
+                        );
+
+                        // Written values read back exactly; omitted ones read
+                        // as unknown rather than as zero.
+                        match fiber {
+                            Some(v) => {
+                                assert!((r.fiber.sum - v).abs() < 1e-9, "fiber: {line}");
+                                assert_eq!(r.fiber.unknown, 0, "fiber unknown: {line}");
+                            }
+                            None => assert_eq!(r.fiber.unknown, 1, "fiber: {line}"),
+                        }
+                        match salt {
+                            Some(v) => {
+                                assert!((r.salt.sum - v).abs() < 1e-9, "salt: {line}");
+                                assert_eq!(r.salt.unknown, 0, "salt unknown: {line}");
+                            }
+                            None => assert_eq!(r.salt.unknown, 1, "salt: {line}"),
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 3 * 3 * 6 * 4, "sweep did not cover the lattice");
     }
 }

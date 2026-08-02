@@ -153,7 +153,12 @@ pub(crate) fn build_food_insert(entry: &ParsedEntry) -> Result<FoodInsert> {
 
     let density_g_per_ml = read_real(&yaml["density_g_per_ml"]);
     if let Some(d) = density_g_per_ml {
-        if d <= 0.0 {
+        // `!is_finite()` first: `+inf` passes `d <= 0.0`, and every NaN
+        // comparison is false so NaN passes it too. An infinite density
+        // collapses the g→ml factor to zero and writes a full panel of
+        // `0.0g` tokens that read back as *measured* zeros — the one state
+        // the unknown counting exists to prevent.
+        if !d.is_finite() || d <= 0.0 {
             return Err(eyre!(
                 "entry '{}' (line {}): density_g_per_ml must be > 0 (got {})",
                 entry.name,
