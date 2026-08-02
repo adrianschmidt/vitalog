@@ -616,17 +616,9 @@ fn render_nutrient_row(
 ) -> String {
     let unit = NUTRIENT_UNIT;
     let lower_bound = total.is_lower_bound(food.skipped_lines);
-    // A day where nothing measured this nutrient still renders its sum,
-    // where `format_nutrient_total` says `fiber unknown (3 entries)` for the
-    // same state. That reads like an inconsistency and is a deliberate
-    // consequence of a different rule: `annotation_survives_unknowns` keeps
-    // `(35 below min)` on a structural zero, because with most of the db
-    // carrying no `fiber:` key that is the ordinary case and a shortfall the
-    // user can act on is the gap this feature was asked to close. Printing
-    // `unknown` beside that shortfall would leave the shortfall with nothing
-    // to be short *of*, and suppressing the shortfall to match has already
-    // been tried and reverted. The `+` and the `(n unknown)` count carry the
-    // caveat instead.
+    // Renders `0.0+` where `format_nutrient_total` says `fiber unknown` for
+    // the same day. Deliberate: this row also carries `(35 below min)`, and
+    // `unknown` next to a shortfall has nothing to be short of.
     let value_str = if lower_bound {
         format!("{:.1}+", total.sum)
     } else {
