@@ -616,6 +616,17 @@ fn render_nutrient_row(
 ) -> String {
     let unit = NUTRIENT_UNIT;
     let lower_bound = total.is_lower_bound(food.skipped_lines);
+    // A day where nothing measured this nutrient still renders its sum,
+    // where `format_nutrient_total` says `fiber unknown (3 entries)` for the
+    // same state. That reads like an inconsistency and is a deliberate
+    // consequence of a different rule: `annotation_survives_unknowns` keeps
+    // `(35 below min)` on a structural zero, because with most of the db
+    // carrying no `fiber:` key that is the ordinary case and a shortfall the
+    // user can act on is the gap this feature was asked to close. Printing
+    // `unknown` beside that shortfall would leave the shortfall with nothing
+    // to be short *of*, and suppressing the shortfall to match has already
+    // been tried and reverted. The `+` and the `(n unknown)` count carry the
+    // caveat instead.
     let value_str = if lower_bound {
         format!("{:.1}+", total.sum)
     } else {
@@ -722,9 +733,9 @@ fn nutrient_row_is_measured(total: &NutrientTotal, food: &FoodTotals) -> bool {
 ///
 /// So the rule is one predicate rather than a table of surviving verdicts:
 /// **a lower bound can only prove a lower-bound claim.** It needs no
-/// per-direction reasoning, which is the point — the same defect has been
-/// found three times in this file, each time as the invariant re-derived in
-/// one more branch and got wrong in one of them. Every path that turns a
+/// per-direction reasoning, which is the point — this defect is easy to
+/// reintroduce, and it arrives the same way every time: the invariant gets
+/// re-derived in one more branch, and one of those derivations is wrong. Every path that turns a
 /// food-derived total into a verdict routes through here:
 /// `food_evidence_verdict` for what the collision rule may treat as
 /// evidence, `annotation_survives_unknowns` for what the row prints.
@@ -2098,9 +2109,9 @@ mod tests {
         // `(n below min)`, `✓ under maximum` and `✓ within range` each
         // claim the true value is *at most* something, which more entries
         // can always undo. A verdict added to `annotate_value` without a
-        // branch here fails this — which is the point, since the last three
-        // rounds of review each found one case of the rule missing from one
-        // branch.
+        // branch here fails this — which is the point, since the way this
+        // rule breaks is always one branch missing it rather than the rule
+        // itself being wrong.
         let bounds = [None, Some(6.0)];
         let values = [0.0, 5.0, 6.0, 6.5, 35.0, 40.0];
         for min in [None, Some(2.0), Some(35.0)] {
