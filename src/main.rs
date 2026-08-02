@@ -33,18 +33,10 @@ fn main() -> Result<()> {
         Some(Commands::Food {
             name,
             amount,
-            kcal,
-            protein,
-            carbs,
-            fat,
-            gi,
-            gl,
-            ii,
+            nutrients,
             date,
             time,
-        }) => cmd_food(
-            name, amount, kcal, protein, carbs, fat, gi, gl, ii, date, time, quiet,
-        ),
+        }) => cmd_food(name, amount, nutrients, date, time, quiet),
         Some(Commands::Note { text, date, time }) => cmd_note(text, date, time, quiet),
         Some(Commands::Bp {
             sys,
@@ -262,17 +254,10 @@ fn cmd_run() -> Result<()> {
     vitalog::app::run()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn cmd_food(
     name: String,
     amount: Option<String>,
-    kcal: Option<f64>,
-    protein: Option<f64>,
-    carbs: Option<f64>,
-    fat: Option<f64>,
-    gi: Option<f64>,
-    gl: Option<f64>,
-    ii: Option<f64>,
+    nutrients: vitalog::cli::food_cmd::NutrientArgs,
     date: Option<String>,
     time: Option<String>,
     quiet: bool,
@@ -281,13 +266,7 @@ fn cmd_food(
     vitalog::cli::food_cmd::execute(
         &name,
         amount.as_deref(),
-        kcal,
-        protein,
-        carbs,
-        fat,
-        gi,
-        gl,
-        ii,
+        nutrients,
         date.as_deref(),
         time.as_deref(),
         &config,

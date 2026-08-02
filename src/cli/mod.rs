@@ -102,22 +102,10 @@ pub enum Commands {
         /// Amount with optional unit (e.g., 500g, 250ml). Required for
         /// per_100g/per_100ml entries; optional for total-panel entries.
         amount: Option<String>,
-        /// Custom kcal value (skips nutrition-db lookup; requires
-        /// --protein, --carbs, --fat to also be set)
-        #[arg(long)]
-        kcal: Option<f64>,
-        #[arg(long)]
-        protein: Option<f64>,
-        #[arg(long)]
-        carbs: Option<f64>,
-        #[arg(long)]
-        fat: Option<f64>,
-        #[arg(long)]
-        gi: Option<f64>,
-        #[arg(long)]
-        gl: Option<f64>,
-        #[arg(long)]
-        ii: Option<f64>,
+        /// Every nutrient flag, defined once in `food_cmd` and consumed
+        /// there — see `NutrientArgs`.
+        #[command(flatten)]
+        nutrients: crate::cli::food_cmd::NutrientArgs,
         /// Override target date (YYYY-MM-DD). Default: effective_today.
         #[arg(long)]
         date: Option<String>,

@@ -42,6 +42,62 @@ fn write_goals(notes_dir: &std::path::Path, body: &str) {
 }
 
 #[test]
+fn end_to_end_fiber_and_salt_rows() {
+    let (dir, config) = setup();
+
+    write_goals(dir.path(), "---\nfiber_min: 35\nsalt_max: 6\n---\n");
+    write_note(
+        dir.path(),
+        "2026-04-30",
+        "---\n\
+         date: 2026-04-30\n\
+         ---\n\n\
+         ## Food\n\
+         - **08:00** Oats (250 kcal, 9.0g protein, 45.0g carbs, 3.0g fat, 6.5g fiber, 0.1g salt)\n\
+         - **12:00** Legacy entry (500 kcal, 18.0g protein, 80.0g carbs, 10.0g fat)\n",
+    );
+
+    let registry = modules::build_registry(&config);
+    let conn = db::open_rw(&config.db_path()).unwrap();
+    db::init_db(&conn, &registry).unwrap();
+    vitalog::materializer::sync_all(&conn, &config.notes_dir_path(), &config, &registry).unwrap();
+
+    let date = NaiveDate::from_ymd_opt(2026, 4, 30).unwrap();
+    let summary = assemble(date, &config, &conn).unwrap();
+    let goals = load_goals(&config.notes_dir_path()).unwrap();
+    let out = render_text(&summary, &goals, false);
+
+    // One entry carries both nutrients, one predates the feature.
+    let fiber = out
+        .lines()
+        .find(|l| l.starts_with("Fiber:"))
+        .expect("Fiber row");
+    assert!(fiber.contains("6.5+"), "got: {fiber}");
+    assert!(fiber.contains("(1 unknown)"), "got: {fiber}");
+    assert!(fiber.contains("below min"), "got: {fiber}");
+
+    let salt = out
+        .lines()
+        .find(|l| l.starts_with("Salt:"))
+        .expect("Salt row");
+    assert!(salt.contains("0.1+"), "got: {salt}");
+    // A lower bound cannot prove it stays under the 6 g cap.
+    assert!(!salt.contains("under maximum"), "got: {salt}");
+
+    let v = render_json(&summary, &goals);
+    assert_eq!(v["metrics"]["fiber"]["unknown_entries"], 1);
+    assert_eq!(v["metrics"]["salt"]["unknown_entries"], 1);
+    // `entry_count` is what lets a consumer tell a partial total apart from
+    // one where nothing at all is known.
+    assert_eq!(v["metrics"]["fiber"]["entry_count"], 2);
+    assert_eq!(v["metrics"]["salt"]["entry_count"], 2);
+    // That `fiber_min` / `salt_max` raise no unknown-metric warning is
+    // covered by `today_cmd::tests::fiber_and_salt_goals_raise_no_unknown_metric_warning`;
+    // `assemble` does not populate `goals_warnings`, so asserting it here
+    // would be vacuous.
+}
+
+#[test]
 fn end_to_end_today_text_and_json() {
     let (dir, config) = setup();
 
