@@ -204,10 +204,10 @@ vitalog food tea
 vitalog food protein-shake
 
 # Food — one-off custom item, all four macros required together;
-# --gi / --gl / --ii independently optional. GL auto-computes when
-# GI and carbs are both known.
+# --fiber / --salt / --gi / --gl / --ii independently optional. GL
+# auto-computes when GI and carbs are both known.
 vitalog food --kcal 350 --protein 7 --carbs 24 --fat 25 \
-            --gi 50 "Random pasta dish" 500g
+            --fiber 4.2 --salt 1.1 --gi 50 "Random pasta dish" 500g
 
 # Note — literal text or a [notes.aliases] key
 vitalog note "Adderall 10mg"
@@ -233,10 +233,61 @@ running `vitalog today`:
 ```
 $ vitalog food "protein shake" 462g
 Food logged: 2026-05-02 12:02
-  - **12:02** Protein shake (462g) (231 kcal, 47.0g protein, 2.4g carbs, 3.6g fat)
+  - **12:02** Protein shake (462g) (231 kcal, 47.0g protein, 2.4g carbs, 3.6g fat, 1.4g fiber, 0.5g salt)
 
-Today so far: 1340 kcal, 95g protein, 50g carbs, 60g fat
+Today so far: 1340 kcal, 95g protein, 50g carbs, 60g fat, 8.4g+ fiber (9 unknown), 5.6g salt
 ```
+
+Fiber and salt are reported as lower bounds. A `nutrition-db.md` entry
+without a `fiber:` or `salt:` key contributes nothing to the total and is
+counted instead, so `8.4g+ fiber (9 unknown)` means nine of the day's
+entries had no fiber value and the true total is at least 8.4 g. A
+nutrient no entry supplied at all reads `fiber unknown (9 entries)` rather
+than `0.0g` — an absent measurement is never reported as zero intake.
+
+A missing `nutrition-db.md` key is not the only way to land in that count.
+Fiber and salt are read **only from a nutrient group vitalog wrote itself**.
+A group is accepted only if it matches what `vitalog food` emits exactly —
+the same items, in the same order, with the same number of decimals — and
+anything else reads as unknown.
+
+That strictness is the whole rule, and it is deliberate. Whether a number
+in a hand-written line is a measurement or part of a food name cannot be
+decided from the text: `Lightly salted chips 0.1g salt per bag` and
+`60g kolhydrater varav ~7g fiber` are the same shape. So neither is read,
+and `unknown` is the honest answer for a day on which nothing recorded the
+value. The four macros are unaffected — they still come off any line that
+names them, exactly as they always have, so nothing that used to count
+stops counting.
+
+Editing a line by hand will not make fiber or salt count. All of
+`- **09:00** Knäckebröd 90 kcal, 6.0g fiber`, `(90 kcal, ca 6.0g fiber)`,
+`(~90 kcal, ~6.0g fiber)`, a trailing `… (90 kcal) (6.0g fiber)`, and even
+`( 90 kcal, 6.0g fiber)` with one extra space read as unknown — and all of
+them keep the entry and its calories in the day's total. To record a value,
+log it: `--fiber` / `--salt` work in both custom and lookup mode, or add the
+key to `nutrition-db.md` and log the entry again.
+
+A food line vitalog cannot parse is missing from every number on that
+line, so it is called out after them — and it makes fiber and salt lower
+bounds as well, even where every entry that *did* parse supplied a value
+(hence the `+` on salt here, which has no unknown entries of its own):
+
+```
+Today so far: 1340 kcal, 95g protein, 50g carbs, 60g fat, 8.4g+ fiber (9 unknown), 5.6g+ salt — 1 food line couldn't be parsed
+```
+
+`--fiber` and `--salt` also work in lookup mode, where they override
+whatever the `nutrition-db.md` panel produced. That is how you fill the gap
+for a food that *is* in the db but carries no `fiber:` key, without
+retyping all four macros to force custom mode:
+
+```bash
+vitalog food "havregryn" 80g --fiber 8
+```
+
+Both are the amount in *this entry*, not a per-100 g figure — the amount
+factor is not applied to them.
 
 Use `--quiet` (or `-q`) for a single-line confirmation, e.g. when
 bulk-logging from scripts:
@@ -260,7 +311,8 @@ the database within ~500 ms.
 ### Daily summary
 
 `vitalog today [date]` prints a compact summary for the day — food
-totals (kcal/protein/carbs/fat from the `## Food` section), morning
+totals (kcal/protein/carbs/fat, plus fiber and salt with their
+unknown-coverage counts, from the `## Food` section), morning
 weight, sleep, morning BP, and any custom metrics — with optional
 goal comparison from `goals.md`. Add `--json` for machine-readable
 output suitable for AI agents and scripts.
@@ -270,6 +322,158 @@ vitalog today                    # today's summary
 vitalog today 2026-04-29         # any past date
 vitalog today --json             # JSON for tooling
 ```
+
+In `--json`, `metrics.fiber` and `metrics.salt` carry five extra keys
+alongside the usual `value` / `min` / `max` / `target`:
+
+```json
+"salt": {
+  "value": 5.6, "max": 6.0,
+  "unknown_entries": 2, "entry_count": 12, "skipped_lines": 0,
+  "verdict": null, "verdict_note": null
+}
+```
+
+`value` is a **lower bound** unless `unknown_entries` and `skipped_lines`
+are both zero — the same test the text surfaces mark with a trailing `+`.
+Here two of the day's twelve entries had no salt figure, so the true total
+is at least 5.6 g. Do not conclude `value <= max` from such an object; the
+text output deliberately withholds its `✓ under maximum` for the same
+reason. An exact total is not automatically a measured one:
+`entry_count == unknown_entries` (including `entry_count == 0`) means
+nothing about the nutrient is known, so that zero never earns a green
+check. A `_min` shortfall is still reported off it — `verdict` is
+`"warn"` — unless a `[metrics.*]` row logs the same nutrient and can
+report the shortfall from a real figure instead.
+
+The three counts describe different gaps and none of them substitutes for
+another:
+
+- `unknown_entries` — entries vitalog parsed that carried no value for
+  this nutrient.
+- `entry_count` — food entries parsed on the day. `unknown_entries ==
+  entry_count` means nothing at all is known, which is why the count is
+  reported: without it, `{"value": 0.0, "unknown_entries": 3}` is
+  indistinguishable from a partial total whose known entries summed to
+  zero. This includes `entry_count == 0`, a day with no food logged: the
+  zero there is structural, not measured, so vitalog never issues a
+  *reassuring* verdict on it — a `_min` shortfall is still reported, as
+  above.
+- `skipped_lines` — food lines vitalog could not parse at all. They are
+  counted in neither of the other two, so an object with
+  `unknown_entries == 0` is still a lower bound when this is non-zero. It
+  is a day-scoped count, repeated on both nutrient objects.
+
+The remaining two keys report the goal check itself rather than the inputs
+to it:
+
+- `verdict` — `"ok"` when `vitalog today` prints a green check for this
+  figure, `"warn"` when it prints a shortfall or overage, and `null` when
+  it prints neither. `null` covers every reason for that: no goal, a
+  target-only goal, and each case below where vitalog declines to rule.
+  Treat all three the same way — **do not compute a verdict of your own
+  from `value` and `max` when this is `null`.** That is the conclusion the
+  text output deliberately withheld, and the counts above are there to
+  explain why, not to license reaching it anyway.
+- `verdict_note` — set only when the day's two figures for this nutrient
+  disagree about the goal (see below); otherwise `null`.
+
+If your config also defines `[metrics.fiber]` or `[metrics.salt]`, the two
+are different measurements of the same quantity and vitalog reports both.
+`vitalog today` prints a row for each and warns about the duplicate. The
+goal is checked once, on the food-derived row — a second verdict for the
+same goal is redundant when the two rows agree and misleading when they
+don't. Three things fall outside that rule:
+
+- On a day the food-derived row measured nothing (no food entries, or none
+  carrying the nutrient) it has no claim on the goal, so your logged row —
+  the day's only figure — keeps its own verdict, and the shortfall the
+  food-derived row would otherwise report off its structural zero steps
+  aside for it. This is the shape of every note written before vitalog
+  tracked nutrients, so it is the normal case for your back-catalogue
+  rather than an edge one. It applies only where a logged row exists to
+  rule instead; without one the food-derived row reports the shortfall as
+  usual.
+- When that row measured only part of the day, its lower bound settles
+  some verdicts and not others: it proves `✓ over minimum` and an
+  over-maximum warning, since more entries can only add, but it cannot
+  prove `✓ under maximum`, `✓ within range` or a shortfall — more entries
+  could undo any of those. Where it proves nothing, your logged row
+  reports its own verdict instead; what is withheld from it is
+  reassurance the food-derived row refused as unprovable, never a warning.
+  So `Fiber: 8.4+ / ≥35 g  (27 below min)` beside a logged 40 g keeps the
+  shortfall on the food-derived row — of what was measured, the day is
+  short — while the logged row, the only figure that can rule, keeps its
+  `✓ over minimum`.
+
+  This is a change from how vitalog behaved before fiber and salt were
+  reported, and worth knowing if you already track one of them by hand: a
+  `[metrics.salt]` row logging 3.4 against `salt_max: 6` used to print
+  `✓ under maximum` on every day, and now goes without it on days the
+  food-derived total measured part of the day and could not prove the same
+  thing (in `--json`, `logged_verdict` is `null` there rather than `"ok"`).
+  Only reassurance is affected; no warning is ever withheld. Note the
+  direction, which is the surprising half: with *nothing* measured your row
+  keeps its check (the bullet above), and one measured entry — strictly
+  more evidence — takes it away. The check is withheld exactly when there
+  is a partial measurement that cannot back it up.
+
+  One smaller pre-existing-behavior change comes with the same release, on
+  rows that have nothing to do with fiber or salt. The `(n below min)` /
+  `(n above max)` distance no longer rounds to a whole unit when that would
+  round to zero; it falls back to one decimal, then two. A weight of
+  110.4 kg against `weight_max: 110` now prints `(0.4 above max)` where it
+  used to print `(0 above max)`, and the weight row, every custom metric
+  row and the four macro rows all share that formatting. The old text was
+  degenerate — it announced a miss and reported the distance as nothing —
+  but if you script on that string, it changed.
+- When the two figures land on **different sides of the goal**, the
+  reassuring one is withheld and the row says why:
+
+  ```
+  Salt: 3.5 / ≤6 g  ⚠ logged 8 g vs 3.5 g measured — cannot reconcile
+  ...
+  Salt: 8 / ≤6 g     (2 above max)
+  ```
+
+  Full coverage does not mean all the salt is accounted for — salt added
+  while cooking or at the table never reaches the food-derived total, and a
+  restaurant meal logged as one entry under-captures seasoning. The
+  food-derived total is a lower bound even at full coverage, so a logged
+  figure above it may be the *more* complete number. The rule is: never
+  show a reassuring verdict that another logged figure on the same day
+  contradicts. It keys on the two verdicts and never on the gap between the
+  numbers, so 3.4 against 3.5 stays silent while 3.5 against 8 under a cap
+  of 6 does not, and it needs no per-goal tuning to work in both directions
+  — under-reporting is the dangerous error under a `_max` goal and
+  over-reporting under a `_min` one.
+
+  It takes two verdicts to disagree, so this needs the food-derived row to
+  have *proved* one — not merely printed one. While its total is an open
+  lower bound it proves only what more entries cannot undo, and a logged
+  figure on the other side of anything else contradicts nothing, because
+  the unmeasured entries could account for the whole difference.
+  `Salt: 2.5+` beside a logged 8 g is the previous case, not this one: no
+  note, and the logged row's `(2 above max)` stands. So is
+  `Fiber: 8.4+  (27 below min)` beside a logged 40 g, where the shortfall
+  is what the day measured rather than what it proves.
+
+In `--json` the food-derived total keeps the `metrics.<id>` slot, so
+`unknown_entries` / `entry_count` / `skipped_lines` / `verdict` /
+`verdict_note` are always present, and your manually logged figure is
+reported alongside it as `logged_value` / `logged_unit` /
+`logged_verdict`. All three are conditional: `logged_value` and
+`logged_verdict` appear only on days you actually logged the metric, and
+`logged_unit` only when the metric defines a `unit`. `logged_verdict`
+takes the same `"ok"` / `"warn"` / `null` values as `verdict`, so at most
+one of the pair is non-null on a day the two rows disagree, and the note
+explaining it is at `verdict_note`. Note also that `metrics.<id>.unit` is
+absent for a shadowed metric — the food-derived object does not carry one,
+and the manual metric's unit moves to `logged_unit`.
+
+Do not rename the metric to resolve the duplicate: the config id doubles
+as the note frontmatter key, so a rename orphans every `salt:` value
+already written in past notes.
 
 ### Trend charts
 
@@ -298,6 +502,8 @@ against:
 kcal_min: 1900
 kcal_max: 2200
 protein_min: 140
+fiber_min: 35
+salt_max: 6
 weight_target: 110
 ---
 ```
@@ -306,6 +512,21 @@ Suffixes recognized: `_min`, `_max`, `_target`. Any frontmatter key
 matching `<metric>_<suffix>` is grouped by `<metric>`. Non-matching
 keys are silently ignored, so the file can also hold commentary keys
 (e.g., `last_review: 2026-04-30`). Suffix matching is case-sensitive.
+
+Fiber and salt goals are checked against a lower bound when some entries
+lack the nutrient or a food line failed to parse, so `vitalog today`
+withholds a `✓ under maximum` mark until coverage is complete — the
+missing entries could still push the total past the cap. A `✓ over
+minimum` or an over-maximum warning is shown regardless, since neither can
+be undone by adding more. On a day where nothing was measured at all — no
+food entries, or none carrying the nutrient — the food-derived row is
+never given a check mark: one earned by an empty sum would be the same
+false reassurance from the other direction. A shortfall against a `_min`
+goal is still reported there, from a zero as from anything else, so
+`fiber_min: 35` on a day with no food logged reads `Fiber: 0.0 / ≥35 g
+(35 below min)`. (The one exception is a day where a `[metrics.*]` row
+logged the same nutrient and can report the shortfall itself — see
+above.)
 
 ## Tabs
 
